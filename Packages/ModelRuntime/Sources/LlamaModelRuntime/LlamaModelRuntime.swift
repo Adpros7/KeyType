@@ -122,9 +122,20 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         }
 
         let common = Self.commonPrefixLength(currentTokens, promptTokens)
-        let shouldReuse = common >= reuseThreshold && common > 0
+        // Reuse the resident KV cache only when the previous tokens are a *prefix* of the new
+        // prompt (a pure append). Any divergence would require rolling back already-decoded
+        // positions with `llama_memory_seq_rm`, which is unsafe for models with recurrent /
+        // hybrid memory (SSM / Gated Delta Net layers, e.g. Qwen3.5): their state can't be
+        // partially rewound, so a later decode collides with a position the memory still holds
+        // (M-RoPE requires the new start position Y to satisfy X < Y). For every non-append
+        // case we clear and fully re-decode, which is always correct on both attention-only and
+        // hybrid models. The multi-branch decoder (ADR-010) leans on this: it re-`prepare`s
+        // divergent branch paths constantly, so the safe fallback matters more than the rollback
+        // fast path. (Efficient branch reuse is a future KV-fork optimization.)
+        let isPureAppend = common == currentTokens.count
+        let shouldReuse = isPureAppend && common >= reuseThreshold && common > 0
 
-        if shouldReuse && common == promptTokens.count && common == currentTokens.count {
+        if shouldReuse && common == promptTokens.count {
             // The prompt is byte-identical to what's already in seq 0. The logits buffer
             // from the previous `llama_decode` is still valid, so we can simply skip the
             // decode entirely — the strongest possible form of KV reuse.
@@ -132,21 +143,17 @@ public actor LlamaModelRuntime: LocalModelRuntime {
             return
         }
 
-        if shouldReuse && common < promptTokens.count {
-            // Keep [0, common) and decode the new suffix. We always have at least one
-            // token to push through `llama_decode` here (common < promptTokens.count),
-            // so the logits buffer is refreshed for the final position.
-            if common < currentTokens.count {
-                _ = llama_memory_seq_rm(memory, 0, llama_pos(common), -1)
-            }
+        if shouldReuse {
+            // Pure append: keep [0, common) and decode the new suffix. `common < promptTokens.count`
+            // here (the identical case returned above), so there's at least one token to push
+            // through `llama_decode`, refreshing the logits buffer for the final position.
             let suffix = Array(promptTokens[common..<promptTokens.count])
             try decodeTokens(suffix, startingAt: common)
             currentTokens = promptTokens
             lastPrepareDecodedCount = suffix.count
         } else {
-            // No usable prefix (or `common == promptTokens.count < currentTokens.count`,
-            // where the previous KV has extra tokens past the prompt that we'd have to
-            // re-decode anyway). Cheaper and simpler to clear and fully redecode.
+            // No usable resident prefix (fresh prompt, a divergence that would need a rollback,
+            // or the new prompt is shorter than what's resident). Clear and fully re-decode.
             llama_memory_clear(memory, true)
             try decodeTokens(promptTokens, startingAt: 0)
             currentTokens = promptTokens

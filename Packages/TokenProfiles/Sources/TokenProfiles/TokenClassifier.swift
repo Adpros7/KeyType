@@ -73,11 +73,17 @@ public enum TokenClassifier {
         // INVALID_UTF8 (standalone byte fallback or partial multi-byte token).
         if rawText == nil { flags.insert(.invalidUTF8) }
 
-        // EXCLUDED: any special non-stop token, chat markers, unknown/unused, plus
-        // standalone invalid-UTF8 tokens (still walkable through the trie as
-        // intermediate steps, but never sampled directly).
+        // EXCLUDED: every special token except a genuine end-of-generation stop we keep as
+        // a stop *condition* (EOS / EOT). A "displayable stop" is role-driven so exclusion no
+        // longer relies on the token's rendered text — which is empty for special tokens under
+        // `rawBytes` / `special: false`. This matters for tokens that are special AND EOG but
+        // are not eos/eot (e.g. a PAD token llama reports as end-of-generation): they must still
+        // be excluded from sampling. Chat markers, unknown/unused, and standalone invalid-UTF8
+        // tokens are excluded too (the latter stay walkable through the trie as intermediate
+        // steps, but are never sampled directly).
+        let isDisplayableStop = probe.role == .eos || probe.role == .eot
         let excluded =
-            (isSpecial && !isStop)
+            (isSpecial && !isDisplayableStop)
             || flags.contains(.chatMarker)
             || probe.attr.contains(.unknown)
             || probe.attr.contains(.unused)

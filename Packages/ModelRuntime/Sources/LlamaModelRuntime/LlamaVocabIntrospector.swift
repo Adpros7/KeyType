@@ -70,13 +70,18 @@ public struct LlamaVocabIntrospector: VocabIntrospecting, @unchecked Sendable {
         while true {
             var buffer = [CChar](repeating: 0, count: Int(capacity))
             let result = buffer.withUnsafeMutableBufferPointer { buf -> Int32 in
+                // `special: false` so this matches `LlamaTokenizer.rawBytes(for:)` exactly —
+                // they must agree, otherwise the tokenizer digest the builder stamps into the
+                // profile won't equal the digest the runtime recomputes at open time (control /
+                // special tokens render differently under `special: true`). Special tokens are
+                // excluded by attribute/role regardless of their byte content.
                 llama_token_to_piece(
                     vocab,
                     llama_token(id),
                     buf.baseAddress,
                     Int32(buf.count),
                     /* lstrip */ 0,
-                    /* special */ true
+                    /* special */ false
                 )
             }
             if result >= 0 {

@@ -143,6 +143,38 @@ final class LlamaModelRuntimeTests: XCTestCase {
         Self.assertTopKArgmaxAgrees(lFresh, lReuse, k: 5, label: "extend-vs-fresh")
     }
 
+    /// Re-preparing a *divergent* path (one that shares only a prefix with what's already
+    /// resident) must produce the same logits as a fresh full decode — and must not crash.
+    /// The previous implementation rolled back with `llama_memory_seq_rm` and decoded the new
+    /// suffix in place; that is unsafe on hybrid / recurrent models (this Qwen3.5 GGUF mixes
+    /// attention with Gated Delta Net / SSM layers): the rollback can't rewind the recurrent
+    /// state, so the next decode collides with a held position (M-RoPE requires X < Y) and
+    /// `llama_decode` fails. The runtime now clears and fully re-decodes on any divergence;
+    /// this locks that behavior in.
+    func testKVReuseDivergentPathMatchesFreshDecode() async throws {
+        let runtime = try makeRuntime(reuseThreshold: 4)
+        let prefix = try runtime.tokenizer.tokenize("The quick brown fox")
+        let pathA = prefix + (try runtime.tokenizer.tokenize(" jumps"))
+        let pathB = prefix + (try runtime.tokenizer.tokenize(" runs"))
+
+        try await runtime.prepare(promptTokens: pathA)
+        _ = try await runtime.logitsForNextToken()
+        // Diverge: pathB shares only `prefix` with the resident pathA, so the runtime must
+        // discard the divergent tail and fully re-decode rather than roll back.
+        try await runtime.prepare(promptTokens: pathB)
+        let reuseDecoded = await runtime.lastPrepareDecodedCount
+        XCTAssertEqual(reuseDecoded, pathB.count, "divergent re-prepare should fully re-decode")
+        let lReuse = try await runtime.logitsForNextToken()
+
+        let fresh = try makeRuntime(reuseThreshold: 4)
+        try await fresh.prepare(promptTokens: pathB)
+        let lFresh = try await fresh.logitsForNextToken()
+
+        XCTAssertEqual(lReuse.count, lFresh.count)
+        Self.assertLogitsNumericallyEqual(lFresh, lReuse, label: "divergent-vs-fresh")
+        Self.assertTopKArgmaxAgrees(lFresh, lReuse, k: 5, label: "divergent-vs-fresh")
+    }
+
     // MARK: - Helpers
 
     /// Asserts that two logit vectors agree within absolute tolerance on every dimension.

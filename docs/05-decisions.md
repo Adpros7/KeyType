@@ -460,3 +460,57 @@ instant, and must not burn battery while no one is typing.
     profiling shows the cold re-decodes hurt per-keystroke latency, the fix is KV-fork via
     `seq_cp`, exposed as an optional runtime capability the engine prefers when available.
 
+## ADR-011 — Real-model generation fixes uncovered by M5 (digest, exclusion, recurrent KV)
+
+- Date: 2026-05-30
+- Status: accepted
+- Context: Running M5's multi-branch decoder against the real Qwen3.5 GGUF + a freshly built
+  ACPF profile surfaced three latent issues from the M2/M4 boundary that the previous
+  single-path greedy loop never exercised. None are visible without a real (hybrid) model
+  plus a profile whose tokenizer digest is validated at open time.
+- Decision:
+  - **Tokenizer digest must be computed from identical bytes on both sides.**
+    `LlamaVocabIntrospector.bytes(for:)` (used by the builder to stamp the profile's
+    tokenizer hash) called `llama_token_to_piece(..., special: true)`, while
+    `LlamaTokenizer.rawBytes(for:)` (used by the runtime to *recompute* and validate that
+    hash at `MmapAutocompleteProfile.open`) used `special: false`. They diverge on control /
+    special tokens, so every profile failed `tokenizerDigestMismatch` against its own model.
+    Fixed by making `bytes(for:)` use `special: false`, honoring its documented contract
+    ("same as `ModelTokenizing.rawBytes(for:)`"). Special tokens are excluded by
+    attribute/role regardless of byte content, so emptying their bytes is harmless.
+  - **Special-token exclusion is role/attribute-driven, not text-driven.** With special
+    tokens now yielding empty bytes, the classifier could no longer recognise a PAD/BOS-style
+    token by its rendered text via the chat-marker regex. A real PAD token that llama reports
+    as end-of-generation (`isEOG`) therefore slipped past the old `excluded = isSpecial &&
+    !isStop` rule. The classifier now excludes every special token except a genuine
+    *displayable stop* (`role == .eos || .eot`); EOG specials without an eos/eot role
+    (PAD/SEP/NL and EOG chat markers) are both `.stop` and `.excluded`. This matches the
+    existing classifier-flag tests and the `03` bias policy ("BOS/PAD/UNK → exclude
+    entirely; EOS/EOT → stop, don't display").
+  - **KV prefix reuse is restricted to pure appends (recurrent-safe).** The multi-branch
+    decoder re-`prepare`s divergent branch paths, which drove `LlamaModelRuntime.prepare`
+    down its `llama_memory_seq_rm` rollback path. On this Qwen3.5 GGUF — which mixes
+    attention with Gated Delta Net / SSM (recurrent) layers — the recurrent state can't be
+    partially rewound, so the subsequent decode collides with a position the memory still
+    holds and `llama_decode` fails M-RoPE's `X < Y` requirement. `prepare` now reuses the
+    resident KV cache only when the previous tokens are a strict prefix of the new prompt (a
+    pure append, no rollback); every divergence or shrink clears and fully re-decodes, which
+    is correct on both attention-only and hybrid models. The seq_rm rollback path was never
+    covered by a test; a new `testKVReuseDivergentPathMatchesFreshDecode` locks the new
+    behavior in.
+  - **Fixed a missing `import ModelRuntime`** in `QwenProfileBuilderTests` (it referenced
+    `ModelContainer` without importing the module that defines it — the target dependency was
+    already declared).
+- Consequences:
+  - Profiles built by `Scripts/build-acpf-profile.sh` now validate against the live runtime;
+    the M5 on-device integration tests run (not skip) and pass.
+  - The append-only KV reuse keeps the per-keystroke fast path (typing extends the prompt)
+    while making branch exploration and backspace/divergence safe. Efficient *branch* reuse
+    (cloning a resident sequence with `seq_cp` and decoding one extra token) remains the
+    future optimization noted in ADR-010; it must be validated against the recurrent layers
+    before use.
+  - Special tokens store empty bytes in the profile and the tokenizer digest is over
+    `rawBytes` (special:false). Drift detection is marginally weaker for special-token-only
+    changes, but `vocabSize` is also hashed and the digest now matches what the runtime can
+    actually recompute — the property that matters.
+

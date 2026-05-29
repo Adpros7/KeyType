@@ -1,6 +1,7 @@
 import AutocompleteCore
 import Foundation
 import LlamaModelRuntime
+import ModelRuntime
 import ProfileBuilderCore
 import TokenProfiles
 import XCTest
