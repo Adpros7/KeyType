@@ -62,6 +62,12 @@ public protocol LocalModelRuntime {
     func decodeNext(tokenID: TokenID) async throws
     func resetKVCache() async
 
+    /// Release any native resources held by the runtime (model, context, GPU residency sets) and
+    /// leave the runtime inert. Must be called before the process exits when the runtime is backed
+    /// by a GPU backend whose process-teardown destructors assert that all resources were freed
+    /// (e.g. llama.cpp's ggml-metal device). Idempotent; safe to call when nothing was allocated.
+    func shutdown() async
+
     /// Next-token logits for `anchor + suffix`, where `anchor` is a prefix shared across many calls
     /// (the base prompt the multi-branch decoder forks from). Implementations may keep `anchor`
     /// resident and decode only `suffix` (cheap KV fork). Semantically identical to
@@ -76,6 +82,9 @@ public extension LocalModelRuntime {
         try await prepare(promptTokens: anchor + suffix)
         return try await logitsForNextToken()
     }
+
+    /// Default: pure-Swift runtimes hold no native resources, so teardown is a no-op.
+    func shutdown() async {}
 }
 
 public struct UTF8FallbackTokenizer: ModelTokenizing {

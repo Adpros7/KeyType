@@ -34,6 +34,12 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
         self.wordRecognizer = wordRecognizer
     }
 
+    /// Tear down the underlying runtime, releasing any native model/GPU resources. Call before the
+    /// process exits; the engine is inert afterwards. See ADR-021.
+    public func shutdown() async {
+        await runtime.shutdown()
+    }
+
     public func completions(for request: CompletionRequest) async throws -> [CompletionCandidate] {
         let policy = compatibilityStore.policy(for: request.context.target)
         guard policy.isCompletionEnabled else { return [] }

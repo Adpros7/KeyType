@@ -129,6 +129,20 @@ final class CompletionController {
         reset()
     }
 
+    /// Release the model/GPU resources before the app exits. Must complete before the process
+    /// terminates: llama.cpp's ggml-metal backend asserts (and aborts) during its process-teardown
+    /// destructors if the context/model — and thus the GPU residency sets — were never freed. We
+    /// stop the pipeline, cancel any in-flight generation, then free the engine's native resources
+    /// and drop our reference so its `deinit` can't race the same teardown. See ADR-021.
+    func shutdown() async {
+        stop()
+        loadState = .idle
+        if let engine {
+            await engine.shutdown()
+        }
+        engine = nil
+    }
+
     // MARK: - Pipeline
 
     private func handle(_ snapshot: FocusedFieldSnapshot?) {

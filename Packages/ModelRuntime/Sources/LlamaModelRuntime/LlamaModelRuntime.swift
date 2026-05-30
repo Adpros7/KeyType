@@ -55,6 +55,10 @@ public actor LlamaModelRuntime: LocalModelRuntime {
     /// `llama_decode`. Exposed for tests that want to assert KV reuse really happened.
     public private(set) var lastPrepareDecodedCount: Int = 0
 
+    /// Set once the native context/model have been freed (either via `shutdown()` or `deinit`), so
+    /// teardown happens exactly once and is never double-freed. See ADR-021.
+    private var didFreeNativeResources = false
+
     public init(
         modelURL: URL,
         contextLength: Int = 4096,
@@ -120,7 +124,22 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         self.tokenizer = LlamaTokenizer(vocab: loadedVocab, vocabSize: vocabSize)
     }
 
+    /// Free the llama context and model up front. The ggml-metal backend keeps a process-global
+    /// device whose C++ destructor (run via `__cxa_finalize` on `exit()`) asserts that every GPU
+    /// residency set has been released; `llama_free`/`llama_model_free` are what release them. If we
+    /// rely on this actor's `deinit` running at process teardown the timing is not guaranteed, so the
+    /// assert fires and aborts on quit. Calling `shutdown()` before terminating frees the resources
+    /// deterministically. The runtime is inert afterwards — do not issue further generation calls.
+    public func shutdown() {
+        guard !didFreeNativeResources else { return }
+        didFreeNativeResources = true
+        llama_free(ctx)
+        llama_model_free(model)
+    }
+
     deinit {
+        guard !didFreeNativeResources else { return }
+        didFreeNativeResources = true
         llama_free(ctx)
         llama_model_free(model)
     }

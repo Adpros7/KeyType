@@ -21,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let completion: CompletionController
     private let acceptance = CompletionAcceptanceController()
     private var permissionSyncTimer: Timer?
+    /// Set once the user has confirmed quitting and the async model teardown is under way, so the
+    /// confirmation alert isn't shown twice and `applicationShouldTerminate` doesn't re-prompt.
+    private var isTerminating = false
 
     override init() {
         let tracker = AccessibilityContextTracker()
@@ -75,6 +78,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Keep running as a menu-bar agent even after the onboarding window is dismissed.
         false
+    }
+
+    /// Gate every quit path (menu item, ⌘Q) behind a confirmation, then tear the model down before
+    /// exiting. The teardown is mandatory, not just polite: llama.cpp's ggml-metal backend aborts in
+    /// its process-exit C++ destructors unless the llama context/model were freed first (the GPU
+    /// residency-set assert in the crash report). We free them asynchronously, then let termination
+    /// proceed via `reply(toApplicationShouldTerminate:)`. See ADR-021.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isTerminating { return .terminateNow }
+
+        // The agent has no dock icon, so bring the alert to the front explicitly.
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Quit KeyType?"
+        alert.informativeText = "KeyType will stop suggesting completions until you open it again."
+        alert.alertStyle = .warning
+        // First button is the default (highlighted, triggered by Return) and sits on the right.
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return .terminateCancel
+        }
+
+        isTerminating = true
+        Task { @MainActor in
+            await completion.shutdown()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func requestOpenOnboarding() {

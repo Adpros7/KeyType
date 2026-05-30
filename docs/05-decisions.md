@@ -953,3 +953,69 @@ text. Both are now closed:
     mid-word is left to native FIM (ADR-017); healing is scoped to end-of-line append.
   - The candidate filter keeps its taxonomy unchanged; no mid-word suppression heuristic remains.
 
+## ADR-020: Suggestion anchoring — track the shown completion against the live caret
+
+- Status: accepted
+- Context: completions are generated for one caret position but stay on screen while the user keeps
+  typing. The controller stored the completion as static state (`visibleRawText` + `visibleContext`)
+  and, at acceptance, only re-reconciled its *leading whitespace* against the live prefix. It never
+  accounted for the user having typed *into* the suggestion during the debounce/generation window.
+  `predictions.log` showed the result as doubled characters: a suggestion of `"excited."` generated
+  for `"…be more "` was inserted verbatim after the user had already typed the `e` (`"…be more e"`),
+  producing `"…be more eexcited."` (likewise `"mmore"`, `"overlayyed"`). Visually the ghost text also
+  sat at the stale caret — "the previous completion is still overlaid" as you type.
+- Decision: treat the generated completion as a fixed **anchor** `(anchorText, anchorContext)` and
+  re-derive what is actually shown/inserted from it against the *live* caret on every keystroke, via
+  `AutocompleteCore.SuggestionAnchor.remaining`:
+  - If nothing moved → the whole `anchorText`.
+  - If the live prefix *extends* the anchor prefix by a run that is a prefix of `anchorText` (the user
+    typed the suggested characters, including any leading separator space) → that run is consumed and
+    the **remainder** is shown/inserted. This is type-through: the ghost shrinks and follows the
+    cursor, and acceptance never re-inserts already-typed text.
+  - Otherwise (deletion, caret jump, change to text after the cursor, or a divergent keystroke) →
+    `nil`, and the suggestion is dropped immediately rather than left dangling.
+  - `CompletionController` calls this from one render path (`renderSuggestion(for:)`) used by both a
+    fresh generation (`present`) and every subsequent snapshot, so the overlay is always positioned at
+    and consistent with the live caret. Acceptance (`insertionText`) uses the same derivation, so what
+    is inserted is exactly what is shown.
+- Consequences:
+  - Fixes the doubled-character bug and the stale overlay; no separate live-prefix reconciliation hack
+    is needed at acceptance (the anchor already absorbed any typed separator).
+  - Pure string logic lives in `AutocompleteCore.SuggestionAnchor` (unit-tested in
+    `SuggestionAnchorTests`); the `@MainActor` controller is a thin wiring layer.
+  - Re-derivation only runs on real edits (identical-snapshot repolls are still deduped by
+    `lastContextKey`), and `InlineGhostTextPresenter.show` updates the overlay in place, so advancing
+    the suggestion does not reintroduce flicker.
+
+## ADR-021: Confirm-and-tear-down on quit (fix ggml-metal abort at exit)
+
+- Status: accepted
+- Context: quitting KeyType (menu "Quit KeyType" / ⌘Q → `NSApp.terminate(nil)`) aborted instead of
+  exiting cleanly. The crash is inside llama.cpp's Metal backend during process teardown:
+  `NSApplication terminate:` → `exit()` → `__cxa_finalize_ranges` runs C++ static destructors, which
+  free the process-global `ggml_metal_device`; its destructor asserts `[rsets->data count] == 0` and
+  `ggml_abort`s. That assert holds only if every GPU residency set was already released — which is
+  exactly what `llama_free`/`llama_model_free` do. Those are called from `LlamaModelRuntime.deinit`,
+  but at `exit()` the Swift runtime objects are still alive (held by the `CompletionController`
+  engine), so `deinit` never runs before the C++ destructors, and the assert fires. Separately, the
+  product wants a confirmation before quitting (quitting stops completions).
+- Decision: free the native model/context *deterministically before* termination, and gate quit
+  behind a confirmation:
+  - `LocalModelRuntime` gains `func shutdown() async` (default no-op for pure-Swift runtimes).
+    `LlamaModelRuntime.shutdown()` calls `llama_free`/`llama_model_free` guarded by a
+    `didFreeNativeResources` flag; `deinit` is guarded by the same flag so teardown happens exactly
+    once whichever path runs first.
+  - `ConstrainedGenerationEngine.shutdown()` forwards to the runtime; `CompletionController.shutdown()`
+    stops the pipeline, cancels in-flight generation, frees the engine, and drops the reference.
+  - `AppDelegate.applicationShouldTerminate(_:)` shows an `NSAlert` ("Quit KeyType?" with **Quit** as
+    the default button and **Cancel**), returns `.terminateCancel` on Cancel, otherwise returns
+    `.terminateLater`, `await`s `completion.shutdown()`, then `reply(toApplicationShouldTerminate:)`.
+    Gating here (not just in the menu button) covers ⌘Q and any other termination path; an
+    `isTerminating` flag prevents a second prompt.
+- Consequences:
+  - Clean exit: residency sets are released before ggml's static destructors run, so the assert no
+    longer trips. The runtime is inert after `shutdown()` — no generation calls may follow.
+  - The teardown is best-effort if the model is still mid-load when the user quits (the engine
+    reference may not be set yet); the abort only reproduces with a loaded model, which by the time a
+    user opens the menu and confirms is the live case.
+
