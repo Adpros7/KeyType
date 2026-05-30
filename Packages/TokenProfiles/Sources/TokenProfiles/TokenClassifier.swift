@@ -226,7 +226,21 @@ public enum TokenClassifier {
             case ".", "?", "!", "\u{2026}",          // ASCII + horizontal ellipsis
                  "\u{201D}", "\u{2019}",              // ” ’
                  "\u{0022}", "\u{0027}",              // " '
-                 "\u{0029}", "\u{005D}":              // ) ]
+                 "\u{0029}", "\u{005D}",              // ) ]
+                 // Non-ASCII sentence terminators so the sentence-end stop works beyond Latin
+                 // scripts. Disambiguation of false positives is the engine's job
+                 // (`SentenceBoundary`); here we only need the candidate set.
+                 "\u{3002}", "\u{FF01}", "\u{FF1F}", // 。 ！ ？ (CJK ideographic / fullwidth)
+                 "\u{FF0E}", "\u{FF61}",              // ． ｡ (fullwidth / halfwidth full stop)
+                 "\u{FF09}", "\u{FF3D}",              // ） ］ (fullwidth closing wrappers)
+                 "\u{300D}", "\u{300F}",              // 」 』 (CJK closing quotes)
+                 "\u{0964}", "\u{0965}",              // । ॥ (Devanagari danda / double danda)
+                 "\u{06D4}", "\u{061F}",              // ۔ ؟ (Arabic full stop / question mark)
+                 "\u{0589}", "\u{1362}",              // ։ ። (Armenian / Ethiopic full stop)
+                 "\u{104A}", "\u{104B}",              // ၊ ။ (Myanmar little section / section)
+                 "\u{037E}":                          // ; (Greek question mark)
+                // NB: the ideographic comma 、 (U+3001) and Arabic comma ، are deliberately
+                // NOT terminators.
                 return true
             default:
                 continue

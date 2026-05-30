@@ -88,6 +88,10 @@ ported into `MacContextCapture` + `CompletionUI` (see `01-architecture.md`).
 - Write tests first where practical (especially profiles, prompting, constrained generation).
 - Record decisions in `05-decisions.md`.
 - Commit per milestone, with clear messages — **but only when the human asks you to commit.**
+- **Debugging completion quality:** the running app writes every prediction + acceptance outcome to
+  `~/Library/Application Support/KeyType/Logs/predictions.log` (truncated each launch). Check it
+  first when a completion looks wrong or missing — details in `01-architecture.md` → *Debugging &
+  observability*.
 
 ## Document index
 

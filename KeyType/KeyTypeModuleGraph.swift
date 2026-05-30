@@ -44,6 +44,30 @@ enum KeyTypeModuleGraph {
         AppCompatibilityStore()
     }
 
+    /// System-dictionary word recogniser for the decoder's current-word typo guard (ADR-015).
+    static func makeWordRecognizer() -> WordRecognizing {
+        SystemWordRecognizer()
+    }
+
+    /// Builds the constrained-generation engine with the system typo guard wired in. Pass
+    /// `wordRecognizer: nil` to disable the guard (e.g. in a context where spell-checking is
+    /// unwanted).
+    static func makeCompletionEngine(
+        runtime: LocalModelRuntime,
+        profile: AutocompleteProfile,
+        compatibilityStore: AppCompatibilityStore = makeCompatibilityStore(),
+        configuration: DecodingConfiguration = DecodingConfiguration(),
+        wordRecognizer: WordRecognizing? = makeWordRecognizer()
+    ) -> ConstrainedGenerationEngine {
+        ConstrainedGenerationEngine(
+            runtime: runtime,
+            profile: profile,
+            compatibilityStore: compatibilityStore,
+            configuration: configuration,
+            wordRecognizer: wordRecognizer
+        )
+    }
+
     /// Local writing-history store. Currently an empty in-memory stub; M8 swaps in a
     /// real on-disk store fed by the user's recent typing.
     static func makeWritingHistory() -> WritingHistoryProviding {

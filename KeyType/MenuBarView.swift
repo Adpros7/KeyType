@@ -11,15 +11,21 @@ import SwiftUI
 struct MenuBarView: View {
     @Environment(PermissionsManager.self) private var permissions
     @Environment(ContextCaptureController.self) private var contextCapture
+    @Environment(CompletionController.self) private var completion
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         @Bindable var contextCapture = contextCapture
+        @Bindable var completion = completion
 
         Group {
             statusLine
+            completionStatusLine
 
             Divider()
+
+            Toggle("Completions enabled", isOn: $completion.completionsEnabled)
+                .disabled(!permissions.accessibility.isGranted)
 
             Toggle("Show caret debug overlay", isOn: $contextCapture.debugOverlayEnabled)
                 .disabled(!permissions.accessibility.isGranted)
@@ -52,5 +58,24 @@ struct MenuBarView: View {
              : "Accessibility: not granted")
         .font(.system(size: 11))
         .foregroundStyle(ax.isGranted ? Color.secondary : Color.red)
+    }
+
+    @ViewBuilder
+    private var completionStatusLine: some View {
+        switch completion.loadState {
+        case .idle, .loading:
+            Text("Model: loading…")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        case .ready:
+            Text("Model: ready")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        case let .unavailable(message):
+            Text("Model unavailable")
+                .font(.system(size: 11))
+                .foregroundStyle(.red)
+                .help(message)
+        }
     }
 }

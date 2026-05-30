@@ -27,6 +27,12 @@
 		4B5450012FC9600000000034 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000035 /* OnboardingView.swift */; };
 		4B5450012FC9600000000036 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000037 /* MenuBarView.swift */; };
 		4B5450012FC9600000000038 /* ContextCaptureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000039 /* ContextCaptureController.swift */; };
+		4B5450012FC9600000000051 /* LlamaModelRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC9600000000050 /* LlamaModelRuntime */; };
+		4B5450012FC9600000000041 /* CompletionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000040 /* CompletionController.swift */; };
+		4B5450012FC9600000000043 /* CompletionAcceptanceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000042 /* CompletionAcceptanceController.swift */; };
+		4B5450012FC9600000000045 /* FieldFontResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000044 /* FieldFontResolver.swift */; };
+		4B5450012FC9600000000047 /* SystemWordRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000046 /* SystemWordRecognizer.swift */; };
+		4B5450012FC9600000000055 /* PredictionLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000054 /* PredictionLog.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -61,6 +67,12 @@
 		4B5450012FC9600000000035 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		4B5450012FC9600000000037 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		4B5450012FC9600000000039 /* ContextCaptureController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextCaptureController.swift; sourceTree = "<group>"; };
+		4B5450012FC9600000000040 /* CompletionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompletionController.swift; sourceTree = "<group>"; };
+		4B5450012FC9600000000042 /* CompletionAcceptanceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompletionAcceptanceController.swift; sourceTree = "<group>"; };
+		4B5450012FC9600000000044 /* FieldFontResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FieldFontResolver.swift; sourceTree = "<group>"; };
+		4B5450012FC9600000000046 /* SystemWordRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemWordRecognizer.swift; sourceTree = "<group>"; };
+		4B5450012FC9600000000054 /* PredictionLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictionLog.swift; sourceTree = "<group>"; };
+		4B5450012FC9600000000049 /* KeyType.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = KeyType.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -72,6 +84,7 @@
 				4B5450012FC9600000000001 /* AutocompleteCore in Frameworks */,
 				4B5450012FC9600000000007 /* CompletionUI in Frameworks */,
 				4B5450012FC9600000000006 /* ConstrainedGeneration in Frameworks */,
+				4B5450012FC9600000000051 /* LlamaModelRuntime in Frameworks */,
 				4B5450012FC9600000000002 /* MacContextCapture in Frameworks */,
 				4B5450012FC9600000000004 /* ModelRuntime in Frameworks */,
 				4B5450012FC9600000000003 /* Prompting in Frameworks */,
@@ -126,7 +139,13 @@
 				4B5450012FC9600000000035 /* OnboardingView.swift */,
 				4B5450012FC9600000000033 /* PermissionsManager.swift */,
 				4B5450012FC9600000000039 /* ContextCaptureController.swift */,
+				4B5450012FC9600000000040 /* CompletionController.swift */,
+				4B5450012FC9600000000042 /* CompletionAcceptanceController.swift */,
+				4B5450012FC9600000000044 /* FieldFontResolver.swift */,
+				4B5450012FC9600000000046 /* SystemWordRecognizer.swift */,
+				4B5450012FC9600000000054 /* PredictionLog.swift */,
 				4B5450012FC960000000000B /* KeyTypeModuleGraph.swift */,
+				4B5450012FC9600000000049 /* KeyType.entitlements */,
 				20DD9A7A2FC95AB900BE1F8C /* Assets.xcassets */,
 			);
 			path = KeyType;
@@ -170,6 +189,7 @@
 				4B5450012FC9600000000011 /* AutocompleteCore */,
 				4B5450012FC9600000000017 /* CompletionUI */,
 				4B5450012FC9600000000016 /* ConstrainedGeneration */,
+				4B5450012FC9600000000050 /* LlamaModelRuntime */,
 				4B5450012FC9600000000012 /* MacContextCapture */,
 				4B5450012FC9600000000014 /* ModelRuntime */,
 				4B5450012FC9600000000013 /* Prompting */,
@@ -310,6 +330,11 @@
 				4B5450012FC9600000000034 /* OnboardingView.swift in Sources */,
 				4B5450012FC9600000000032 /* PermissionsManager.swift in Sources */,
 				4B5450012FC9600000000038 /* ContextCaptureController.swift in Sources */,
+				4B5450012FC9600000000041 /* CompletionController.swift in Sources */,
+				4B5450012FC9600000000043 /* CompletionAcceptanceController.swift in Sources */,
+				4B5450012FC9600000000045 /* FieldFontResolver.swift in Sources */,
+				4B5450012FC9600000000047 /* SystemWordRecognizer.swift in Sources */,
+				4B5450012FC9600000000055 /* PredictionLog.swift in Sources */,
 				4B5450012FC960000000000A /* KeyTypeModuleGraph.swift in Sources */,
 				20DD9A822FC95AB900BE1F8C /* KeyTypeApp.swift in Sources */,
 			);
@@ -473,6 +498,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = KeyType/KeyType.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -508,6 +534,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = KeyType/KeyType.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -718,6 +745,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 4B5450012FC9600000000022 /* XCLocalSwiftPackageReference "Packages/ModelRuntime" */;
 			productName = ModelRuntime;
+		};
+		4B5450012FC9600000000050 /* LlamaModelRuntime */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4B5450012FC9600000000022 /* XCLocalSwiftPackageReference "Packages/ModelRuntime" */;
+			productName = LlamaModelRuntime;
 		};
 		4B5450012FC9600000000015 /* TokenProfiles */ = {
 			isa = XCSwiftPackageProductDependency;

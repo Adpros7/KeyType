@@ -1,3 +1,4 @@
+import AppKit
 import AutocompleteCore
 @testable import ConstrainedGeneration
 import LlamaModelRuntime
@@ -12,7 +13,8 @@ final class QualitativeDemoTests: XCTestCase {
     private static let family = "qwen3-v151936"
 
     private func loadEngine(
-        configuration: DecodingConfiguration = DecodingConfiguration(maxCandidates: 5)
+        configuration: DecodingConfiguration = DecodingConfiguration(maxCandidates: 5),
+        recognizer: WordRecognizing? = nil
     ) throws -> (engine: ConstrainedGenerationEngine, loadSeconds: Double) {
         try XCTSkipUnless(ModelContainer.defaultModelExists(), "GGUF missing; skipping demo")
         let profileURL = try ModelContainer.profileURL(family: Self.family)
@@ -32,7 +34,8 @@ final class QualitativeDemoTests: XCTestCase {
         let engine = ConstrainedGenerationEngine(
             runtime: runtime,
             profile: profile,
-            configuration: configuration
+            configuration: configuration,
+            wordRecognizer: recognizer
         )
         let loadSeconds = elapsed(since: start)
         return (engine, loadSeconds)
@@ -99,6 +102,127 @@ final class QualitativeDemoTests: XCTestCase {
             }
         }
         print("\n=================================================================\n")
+    }
+
+    /// A broad sweep of English strings — questions, emails, lists, code, contractions, numbers,
+    /// mid-word completions — with the real `NSSpellChecker` typo guard wired in, so we can eyeball
+    /// quality and confirm the guard doesn't over-suppress.
+    func testPrintVariedStrings() async throws {
+        let (engine, _) = try loadEngine(recognizer: SpellCheckRecognizer())
+        let target = AppTarget(bundleIdentifier: "com.test.app", appName: "Test")
+        let prompts = [
+            "Could you please let me",
+            "I can't believe it's already",
+            "The total comes to $42.50 and the",
+            "On Monday we have 3",
+            "Her email address is jane.doe@",
+            "TODO: refactor the parser to",
+            "The U.S. economy grew by",
+            "He said, \"I'll be there",
+            "https://www.example.com/path?query=",
+            "I will see you tom",
+            "Thank you for your patience and",
+            "import numpy as np\n",
+            "for i in range(10):\n    ",
+            "Best regards,\n",
+            "The mitochondria is the powerhouse of the"
+        ]
+
+        print("\n================ KeyType varied strings (maxTokens=6, spell guard on) ================")
+        for prompt in prompts {
+            let request = makeRequest(prompt, target: target, maxTokens: 6, language: "en")
+            let candidates = try await engine.completions(for: request)
+            print("\nPROMPT: \(display(prompt))")
+            if candidates.isEmpty { print("  (suppressed — no candidate)") }
+            for (i, c) in candidates.prefix(3).enumerated() {
+                print("  [\(i)] \(display(c.text))")
+            }
+        }
+        print("\n=====================================================================================\n")
+    }
+
+    /// Completions across many languages/scripts, each with its `detectedLanguage` set so the typo
+    /// guard uses the right dictionary (and is conservatively inert where none exists).
+    func testPrintMultilingualGenerations() async throws {
+        let (engine, loadSeconds) = try loadEngine(recognizer: SpellCheckRecognizer())
+        let target = AppTarget(bundleIdentifier: "com.test.app", appName: "Test")
+
+        // (language tag, [prompts ending exactly at the cursor])
+        let groups: [(String, [String])] = [
+            ("en", ["The capital of France is", "Once upon a time there was a"]),
+            ("fr", ["La capitale de la France est", "Je vous écris pour vous informer que"]),
+            ("de", ["Die Hauptstadt von Deutschland ist", "Ich freue mich darauf, von"]),
+            ("es", ["La capital de España es", "Le escribo para informarle que"]),
+            ("it", ["La capitale d'Italia è", "Ti scrivo per dirti che"]),
+            ("pt", ["A capital do Brasil é", "Estou escrevendo para informar que"]),
+            ("nl", ["De hoofdstad van Nederland is"]),
+            ("ru", ["Столица России —", "Я пишу вам, чтобы сообщить, что"]),
+            ("zh", ["中国的首都是", "今天的天气"]),
+            ("ja", ["日本の首都は", "今日の天気は"]),
+            ("ko", ["한국의 수도는", "오늘 날씨는"]),
+            ("ar", ["عاصمة مصر هي", "أكتب إليك لإبلاغك بأن"]),
+            ("hi", ["भारत की राजधानी है", "मैं आपको यह बताने के लिए लिख रहा हूँ कि"])
+        ]
+
+        print("\n================ KeyType multilingual generations (maxTokens=6) ================")
+        print(String(format: "model + profile load: %.0f ms", loadSeconds * 1000))
+        for (language, prompts) in groups {
+            print("\n----- \(language) -----")
+            for prompt in prompts {
+                let request = makeRequest(prompt, target: target, maxTokens: 6, language: language)
+                let candidates = try await engine.completions(for: request)
+                print("PROMPT: \(display(prompt))")
+                if candidates.isEmpty { print("  (suppressed — no candidate)") }
+                for (i, c) in candidates.prefix(2).enumerated() {
+                    print("  [\(i)] \(display(c.text))   (tokens=\(c.tokenIDs.count), width=\(c.displayWidth))")
+                }
+            }
+        }
+        print("\n===============================================================================\n")
+    }
+
+    /// Generates longer passages (high `maxCompletionTokens` + wide display) so we can judge how
+    /// coherent the constrained beam stays well past the 4-token autocomplete default. Run with
+    /// `-c release` for representative latency.
+    func testPrintLongCompletions() async throws {
+        let (engine, _) = try loadEngine(
+            configuration: DecodingConfiguration(branchWidth: 4, maxCandidates: 3)
+        )
+        let target = AppTarget(bundleIdentifier: "com.test.app", appName: "Test")
+        let prompts = [
+            "A quick brown fox",
+            "The history of the Roman Empire is",
+            "To make a good cup of coffee, you",
+            "Dear hiring manager, I am writing to apply for",
+            "The most important thing to remember when learning to program is",
+            "Once upon a time, in a village at the edge of a great forest,",
+            "def fibonacci(n):\n    "
+        ]
+
+        for maxTokens in [16, 32] {
+            print("\n========== KeyType long completions (maxTokens=\(maxTokens)) ==========")
+            for prompt in prompts {
+                let request = CompletionRequest(
+                    context: TextFieldContext(beforeCursor: prompt, target: target),
+                    prompt: prompt,
+                    mode: .prose,
+                    maxCompletionTokens: maxTokens,
+                    maxDisplayWidth: 400
+                )
+                let start = DispatchTime.now()
+                let candidates = try await engine.completions(for: request)
+                let ms = elapsed(since: start) * 1000
+
+                print("\nPROMPT: \(display(prompt))   (\(Int(ms)) ms)")
+                if candidates.isEmpty { print("  (suppressed — no candidate)") }
+                for (i, c) in candidates.enumerated() {
+                    let score = String(format: "%.2f", c.logProbability)
+                    print("  [\(i)] \(display(c.text))")
+                    print("       (logp=\(score), width=\(c.displayWidth), tokens=\(c.tokenIDs.count))")
+                }
+            }
+            print("\n====================================================================\n")
+        }
     }
 
     /// Measures steady-state (warm-model) completion latency, which is what a user feels while
@@ -229,9 +353,14 @@ final class QualitativeDemoTests: XCTestCase {
         print("=========================================================\n")
     }
 
-    private func makeRequest(_ prompt: String, target: AppTarget, maxTokens: Int) -> CompletionRequest {
+    private func makeRequest(
+        _ prompt: String,
+        target: AppTarget,
+        maxTokens: Int,
+        language: String? = nil
+    ) -> CompletionRequest {
         CompletionRequest(
-            context: TextFieldContext(beforeCursor: prompt, target: target),
+            context: TextFieldContext(beforeCursor: prompt, target: target, detectedLanguage: language),
             prompt: prompt,
             mode: .prose,
             maxCompletionTokens: maxTokens,
@@ -245,5 +374,38 @@ final class QualitativeDemoTests: XCTestCase {
 
     private func display(_ s: String) -> String {
         "\"" + s.replacingOccurrences(of: "\n", with: "\\n") + "\""
+    }
+}
+
+/// `WordRecognizing` backed by `NSSpellChecker` (mirrors the app target's `SystemWordRecognizer`)
+/// so the demos exercise the real typo guard. Conservative: anything the checker can't evaluate is
+/// reported as recognised.
+private struct SpellCheckRecognizer: WordRecognizing {
+    func recognizes(_ word: String, language: String?) async -> Bool {
+        guard !word.isEmpty else { return true }
+        return await MainActor.run {
+            let checker = NSSpellChecker.shared
+            let resolved = SpellCheckRecognizer.resolveLanguage(language, checker: checker)
+            checker.automaticallyIdentifiesLanguages = (resolved == nil)
+            let misspelled = checker.checkSpelling(
+                of: word,
+                startingAt: 0,
+                language: resolved,
+                wrap: false,
+                inSpellDocumentWithTag: 0,
+                wordCount: nil
+            )
+            return misspelled.location == NSNotFound
+        }
+    }
+
+    private static func resolveLanguage(_ requested: String?, checker: NSSpellChecker) -> String? {
+        guard let requested, !requested.isEmpty else { return nil }
+        let normalized = requested.replacingOccurrences(of: "-", with: "_")
+        let available = checker.availableLanguages
+        if available.contains(normalized) { return normalized }
+        let base = String(normalized.prefix { $0 != "_" })
+        if available.contains(base) { return base }
+        return nil
     }
 }

@@ -239,6 +239,68 @@ final class ConstrainedGenerationEngineTests: XCTestCase {
         XCTAssertEqual(candidates.map(\.text), ["ok"])
     }
 
+    // MARK: - Multilingual / byte-fallback width + finalization
+
+    /// A CJK character ("中" = E4 B8 AD) emitted as three single-byte tokens must count as one
+    /// grapheme of display width, not three — otherwise byte-fallback scripts blow the width cap.
+    func testByteFallbackMultibyteCountsOneGraphemeOfWidth() async throws {
+        let profile = profile([
+            record(1, rawBytes: [0xE4]),
+            record(2, rawBytes: [0xB8]),
+            record(3, rawBytes: [0xAD])
+        ])
+        let runtime = runtime([
+            []: [logit(1, 2.0)],
+            [1]: [logit(2, 2.0)],
+            [1, 2]: [logit(3, 2.0)]
+        ])
+        let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profile)
+
+        // maxWidth 1 would reject the branch if width were summed per byte (3 > 1).
+        let candidates = try await engine.completions(for: request(maxTokens: 3, maxWidth: 1))
+
+        XCTAssertEqual(candidates.map(\.text), ["中"])
+        XCTAssertEqual(candidates.first?.displayWidth, 1)
+    }
+
+    /// A combining mark (here U+0301, two bytes CC 81) attaches to the previous grapheme and must
+    /// add zero display width — relevant to Arabic/Hebrew/Devanagari/Thai marks.
+    func testCombiningMarkAddsZeroWidth() async throws {
+        let profile = profile([
+            record(1, "e"),
+            record(2, rawBytes: [0xCC, 0x81]) // combining acute accent
+        ])
+        let runtime = runtime([
+            []: [logit(1, 2.0)],
+            [1]: [logit(2, 2.0)]
+        ])
+        let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profile)
+
+        // maxWidth 1: a per-token sum (1 + 2) would exceed it and drop the branch.
+        let candidates = try await engine.completions(for: request(maxTokens: 2, maxWidth: 1))
+
+        XCTAssertEqual(candidates.map(\.text), ["e\u{0301}"])
+        XCTAssertEqual(candidates.first?.displayWidth, 1)
+    }
+
+    /// When the token-depth cap lands mid-character (a trailing *pending* multi-byte sequence),
+    /// the branch should still emit its valid-UTF-8 prefix rather than be dropped entirely.
+    func testPendingTrailingBytesEmitValidPrefix() async throws {
+        let profile = profile([
+            record(1, "a"),
+            record(2, rawBytes: [0xE4]) // first byte of a 3-byte char; never completed
+        ])
+        let runtime = runtime([
+            []: [logit(1, 2.0)],
+            [1]: [logit(2, 2.0)]
+        ])
+        let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profile)
+
+        let candidates = try await engine.completions(for: request(maxTokens: 2))
+
+        XCTAssertEqual(candidates.map(\.text), ["a"])
+    }
+
     // MARK: - Stop conditions
 
     func testStopsOnEOSAndKeepsPriorText() async throws {
@@ -339,5 +401,136 @@ final class ConstrainedGenerationEngineTests: XCTestCase {
         let candidates = try await engine.completions(for: request(maxTokens: 2, afterCursor: "tail"))
 
         XCTAssertTrue(candidates.isEmpty)
+    }
+
+    // MARK: - Current-word typo guard
+
+    /// Recognises exactly the words it is told about; everything else is "misspelled".
+    private struct StubRecognizer: AutocompleteCore.WordRecognizing {
+        let known: Set<String>
+        func recognizes(_ word: String, language: String?) async -> Bool {
+            known.contains(word.lowercased())
+        }
+    }
+
+    private func typoRequest(
+        beforeCursor: String,
+        afterCursor: String = "",
+        mode: CompletionMode = .prose,
+        maxTokens: Int = 3
+    ) -> CompletionRequest {
+        CompletionRequest(
+            context: TextFieldContext(
+                beforeCursor: beforeCursor,
+                afterCursor: afterCursor,
+                target: Self.testTarget
+            ),
+            prompt: "",
+            mode: mode,
+            maxCompletionTokens: maxTokens,
+            maxDisplayWidth: 80
+        )
+    }
+
+    /// Tokens that build both spellings of "tomorrow" from the stem "tom": the typo path
+    /// "or"+"ow"+"." outscores the correct single-token "orrow"+".".
+    private func tomorrowFixture() -> ([TokenProfileRecord], [[TokenID]: [TokenLogit]]) {
+        let records = [
+            record(20, "or"), record(21, "ow"), record(10, "orrow"),
+            record(30, ".", flags: .sentenceEnd)
+        ]
+        let logits: [[TokenID]: [TokenLogit]] = [
+            []: [logit(20, 2.0), logit(10, 1.0)], // "or" (typo path) scores higher than "orrow"
+            [20]: [logit(21, 2.0)],
+            [20, 21]: [logit(30, 2.0)],
+            [10]: [logit(30, 2.0)]
+        ]
+        return (records, logits)
+    }
+
+    /// Without a recogniser the misspelled tokenisation wins (the bug); with one that knows only
+    /// the correct spelling, the typo branch is dropped mid-search and the correct branch surfaces.
+    func testTypoBranchDroppedSoCorrectSpellingWins() async throws {
+        let (records, logits) = tomorrowFixture()
+
+        let noGuard = ConstrainedGenerationEngine(runtime: runtime(logits), profile: profile(records))
+        let bug = try await noGuard.completions(for: typoRequest(beforeCursor: "I will see you tom"))
+        XCTAssertEqual(bug.first?.text, "orow.", "without the guard the misspelling out-scores the fix")
+
+        let guarded = ConstrainedGenerationEngine(
+            runtime: runtime(logits),
+            profile: profile(records),
+            wordRecognizer: StubRecognizer(known: ["tomorrow"])
+        )
+        let fixed = try await guarded.completions(for: typoRequest(beforeCursor: "I will see you tom"))
+        XCTAssertEqual(fixed.map(\.text), ["orrow."], "typo dropped, correct spelling kept")
+    }
+
+    /// Requirement 3: a non-dictionary word that already appears in the surrounding text is a
+    /// special term, not a typo, so it must be kept even with a recogniser that rejects it.
+    func testWordPresentInContextIsKept() async throws {
+        let (records, logits) = tomorrowFixture()
+        let engine = ConstrainedGenerationEngine(
+            runtime: runtime(logits),
+            profile: profile(records),
+            wordRecognizer: StubRecognizer(known: []) // knows nothing
+        )
+
+        // "tomorow" appears earlier in the field → treated as a deliberate term.
+        let candidates = try await engine.completions(
+            for: typoRequest(beforeCursor: "my tomorow tom")
+        )
+        XCTAssertEqual(candidates.first?.text, "orow.")
+    }
+
+    /// A word still being formed (no boundary yet) is a valid prefix and must never be flagged,
+    /// even by a recogniser that rejects everything.
+    func testOpenWordAtCapIsNotFlagged() async throws {
+        let records = [record(20, "or"), record(21, "ow")]
+        let logits: [[TokenID]: [TokenLogit]] = [
+            []: [logit(20, 2.0)],
+            [20]: [logit(21, 2.0)]
+        ]
+        let engine = ConstrainedGenerationEngine(
+            runtime: runtime(logits),
+            profile: profile(records),
+            wordRecognizer: StubRecognizer(known: [])
+        )
+
+        let candidates = try await engine.completions(
+            for: typoRequest(beforeCursor: "I will see you tom", maxTokens: 2)
+        )
+        XCTAssertEqual(candidates.map(\.text), ["orow"], "incomplete word is a prefix, never a typo")
+    }
+
+    /// Code mode never spell-checks — identifiers are not typos.
+    func testCodeModeSkipsTypoGuard() async throws {
+        let (records, logits) = tomorrowFixture()
+        let engine = ConstrainedGenerationEngine(
+            runtime: runtime(logits),
+            profile: profile(records),
+            wordRecognizer: StubRecognizer(known: [])
+        )
+
+        let candidates = try await engine.completions(
+            for: typoRequest(beforeCursor: "let x = tom", mode: .code)
+        )
+        XCTAssertEqual(candidates.first?.text, "orow.")
+    }
+
+    /// Capitalised words (proper nouns, sentence starts) are exempt to avoid false positives.
+    func testCapitalizedWordIsNotFlagged() async throws {
+        let (records, logits) = tomorrowFixture()
+        let engine = ConstrainedGenerationEngine(
+            runtime: runtime(logits),
+            profile: profile(records),
+            wordRecognizer: StubRecognizer(known: [])
+        )
+
+        // Stem "Tom" → reconstructed word "Tomorow" has an uppercase letter → never judged.
+        let candidates = try await engine.completions(
+            for: typoRequest(beforeCursor: "See you Tom")
+        )
+        XCTAssertEqual(candidates.first?.text, "orow.")
     }
 }

@@ -25,11 +25,12 @@ final class ContextCaptureController {
 
     private(set) var isRunning = false
     private(set) var lastSummary: String = ""
-    var debugOverlayEnabled: Bool = true {
+    var debugOverlayEnabled: Bool = false {
         didSet { applyOverlayVisibility() }
     }
 
     private var listenerToken: UUID?
+    private var lastLoggedSummary: String?
 
     init(
         tracker: AccessibilityContextTracker = AccessibilityContextTracker(),
@@ -70,7 +71,12 @@ final class ContextCaptureController {
         }
 
         lastSummary = Self.summary(for: snapshot)
-        log.debug("\(self.lastSummary, privacy: .public)")
+        // The tracker re-emits on caret-geometry repolls even when nothing the user cares about
+        // changed; only log when the summary actually changes to keep the debug log readable.
+        if lastSummary != lastLoggedSummary {
+            lastLoggedSummary = lastSummary
+            log.debug("\(self.lastSummary, privacy: .public)")
+        }
 
         if debugOverlayEnabled, let rect = snapshot.caretRect, !rect.isEmpty {
             overlay.show(at: rect)

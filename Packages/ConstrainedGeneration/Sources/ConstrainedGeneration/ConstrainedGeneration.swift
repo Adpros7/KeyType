@@ -18,17 +18,20 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
     private let profile: AutocompleteProfile
     private let compatibilityStore: AppCompatibilityStore
     private let configuration: DecodingConfiguration
+    private let wordRecognizer: WordRecognizing?
 
     public init(
         runtime: LocalModelRuntime,
         profile: AutocompleteProfile,
         compatibilityStore: AppCompatibilityStore = AppCompatibilityStore(),
-        configuration: DecodingConfiguration = DecodingConfiguration()
+        configuration: DecodingConfiguration = DecodingConfiguration(),
+        wordRecognizer: WordRecognizing? = nil
     ) {
         self.runtime = runtime
         self.profile = profile
         self.compatibilityStore = compatibilityStore
         self.configuration = configuration
+        self.wordRecognizer = wordRecognizer
     }
 
     public func completions(for request: CompletionRequest) async throws -> [CompletionCandidate] {
@@ -37,6 +40,13 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
         guard policy.allowsMidLineCompletion || request.context.afterCursor.isEmpty else { return [] }
 
         let basePrompt = try runtime.tokenizer.tokenize(request.prompt)
+        // A short tail of the prompt so sentence-boundary disambiguation can see context that
+        // precedes the generated text (e.g. an abbreviation the prompt ends on).
+        let promptTail = String(request.prompt.suffix(32))
+
+        // Drops branches whose current word completes into a misspelling, mid-search, so the beam
+        // keeps exploring correctly-spelled continuations instead (see ADR-015 / CurrentWordTypoGuard).
+        let typoGuard = CurrentWordTypoGuard(recognizer: wordRecognizer, request: request)
 
         var live = [GenerationBranch(requiredPrefix: request.requiredPrefixBytes)]
         var finalized: [GenerationBranch] = []
@@ -84,7 +94,6 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
                     let outcome = branch.extending(
                         withToken: id,
                         bytes: tokenBytes,
-                        profileWidth: profile.displayWidth(for: id),
                         logProbability: token.logProbability,
                         maxDisplayWidth: request.maxDisplayWidth
                     )
@@ -93,9 +102,22 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
                     case .inadmissiblePrefix, .invalidUTF8, .overWidth:
                         continue // drop this extension
                     case let .extended(child):
+                        // If this token just closed the word the user is completing and that word is
+                        // a misspelling, drop the branch now — never finalise it and never spend
+                        // further beam budget continuing from the wrong spelling.
+                        if await typoGuard.shouldDrop(parentText: branch.text, childText: child.text) {
+                            continue
+                        }
                         switch profile.stopBehavior(for: id) {
                         case .stopAndDisplay:
-                            finalizeIfValid(child, into: &finalized)
+                            // The sentence-end flag is context-free; only stop on a *real*
+                            // boundary. A false one ("1.", "Mr.", "e.g.") keeps generating so we
+                            // don't truncate a numbered list / abbreviation mid-thought.
+                            if SentenceBoundary.isTerminal(promptTail + child.text) {
+                                finalizeIfValid(child, into: &finalized)
+                            } else {
+                                nextLive.append(child)
+                            }
                         case .stopAndSuppress:
                             continue
                         case .continueGeneration:

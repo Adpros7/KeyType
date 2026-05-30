@@ -408,7 +408,8 @@ instant, and must not burn battery while no one is typing.
     Efficient KV-fork (`llama_memory_seq_cp` to clone a sequence and decode one extra token
     per branch) is the obvious follow-up optimization and is the reason M2 listed the seq
     ops; it can be added later behind an optional capability without touching the protocol
-    or `AutocompleteCore`.
+    or `AutocompleteCore`. (Update: ADR-012 prototyped and **rejected** this — once measured in
+    a release build the loop is already ~162 ms, so the fork isn't worth its memory/complexity.)
   - **Deterministic best-first beam, not stochastic sampling.** Expansion keeps the
     highest cumulative-logprob branches; `temperature` / `topK` / `topP` only *shape the
     per-step candidate pool* (`TokenSampler.rank`). No RNG — autocomplete must be
@@ -456,9 +457,9 @@ instant, and must not burn battery while no one is typing.
     prefix, invalid-UTF8 and over-width dropping, EOS / suppress / sentence-end stops,
     cancellation, and policy gates. A `XCTSkipUnless`-gated integration test exercises a real
     `LlamaModelRuntime` + `MmapAutocompleteProfile`.
-  - The re-`prepare` strategy trades per-branch decode cost for protocol stability. If
-    profiling shows the cold re-decodes hurt per-keystroke latency, the fix is KV-fork via
-    `seq_cp`, exposed as an optional runtime capability the engine prefers when available.
+  - The re-`prepare` strategy trades per-branch decode cost for protocol stability. (Update:
+    ADR-012 measured this in a release build — ~162 ms warm per completion — and rejected the
+    KV-fork follow-up as unnecessary; the re-`prepare` cost is fine in release.)
 
 ## ADR-011 — Real-model generation fixes uncovered by M5 (digest, exclusion, recurrent KV)
 
@@ -514,20 +515,34 @@ instant, and must not burn battery while no one is typing.
     changes, but `vocabSize` is also hashed and the digest now matches what the runtime can
     actually recompute — the property that matters.
 
-## ADR-012 — Decoder latency: per-branch work and beam tuning (M5)
+## ADR-012 — Decoder latency: measure in release; per-branch work and beam tuning (M5)
 
 - Date: 2026-05-30
 - Status: accepted
+- **Measurement caveat (read first).** All performance numbers must be taken from a
+  **release build** (`swift test -c release` / `swift build -c release`). The Swift package
+  test suite builds **debug** by default, where bounds checks, ARC, and the lack of inlining
+  inflate the per-token Swift work by **1–2 orders of magnitude** and produce wildly
+  misleading latency. Example, same code, same machine (M5 Max), 151,936-token vocab:
+
+  | phase (per branch expansion) | debug | release |
+  | --- | --- | --- |
+  | raw decode throughput | ~28 tok/s | **~213 tok/s** |
+  | `logitsForNextToken` (vocab-wide copy) | ~17 ms | **~0.04 ms** |
+  | `TokenSampler.rank` | ~16 ms | **~0.16 ms** |
+  | `llama_decode` (clear + re-decode short prompt) | ~16 ms | ~16 ms |
+
+  Only `llama_decode` (Metal compute) is build-mode-independent. The release decode rate
+  (~213 tok/s) matches/exceeds a standalone `llama.cpp` host (LM Studio) on the same model.
 - Context: The first end-to-end timing of the M5 decoder against the real model
-  (Qwen3.5-2B-Base Q4_K_M, fully Metal-offloaded on an M5 Max) measured **~12.3 s per
-  4-token completion** — unusable for keystroke-latency autocomplete. A phase breakdown
-  (`QualitativeDemoTests.testPhaseBreakdown`) attributed essentially all of it to per-branch
-  work repeated across the ~`1 + 3·branchWidth` branch expansions of a depth-4 beam:
-  `TokenSampler.rank` **485 ms**, `logitsForNextToken` 19 ms, and the engine's separate
-  argmax `.max(by:)` pass — each a full sweep of the 151,936-token vocabulary — plus a ~16 ms
-  `llama_decode`. The model itself was not the bottleneck (GPU offload confirmed via
-  `load_tensors: ... assigned to device MTL0`).
-- Decision (algorithmic, behaviour-preserving):
+  (Qwen3.5-2B-Base Q4_K_M — a hybrid attention + Gated Delta Net model, fully Metal-offloaded)
+  measured **~12.3 s per 4-token completion** *in a debug build*. A phase breakdown attributed
+  it to per-branch work repeated across the ~`1 + 3·branchWidth` branch expansions of a depth-4
+  beam — chiefly `TokenSampler.rank` (485 ms debug) sweeping the whole vocabulary. The model
+  was never the bottleneck (GPU offload confirmed via `load_tensors: ... assigned to device
+  MTL0`); the apparent disaster was dominated by debug-mode Swift overhead.
+- Decision (algorithmic, behaviour-preserving): kept because they are good practice and cut the
+  worst debug-mode cost, even though release makes them nearly free.
   - **Pre-select before ranking.** `TokenSampler.rank` no longer runs softmax + a full
     150k-element sort + 150k `log()` over the whole vocabulary. It first takes the top
     `max(topK·4, 256)` tokens by raw logit via a bounded min-heap (O(n log k), no profile
@@ -535,41 +550,278 @@ instant, and must not burn battery while no one is typing.
     that pool. For the small vocabularies in the deterministic unit tests the pool is the
     whole vocab, so behaviour there is unchanged. Pre-selection ignores per-token static bias
     (small, relative to the logit spread on the real profile), which cannot realistically lift
-    a token from outside the top few hundred into the top-k. Result: **485 ms → ~16 ms**.
+    a token from outside the top few hundred into the top-k. (Debug: 485 ms → ~16 ms.)
   - **Fold the hard-stop argmax into the sampler.** `rank` now returns a `SamplerResult`
     carrying the global argmax (tracked in its single candidate scan, before exclusion), so
     the engine no longer does its own `logits.max(by:)` full-vocab pass to detect "the model
     wants to stop here."
-  - **Build the logits vector in one pass** (`Array(unsafeUninitializedCapacity:)`) instead
-    of element-wise `append`.
-  - These three are pure wins (no quality change) and took the warm mean from **~12.3 s to
-    ~1.0 s**.
+  - **Build the logits vector in one pass** (`Array(unsafeUninitializedCapacity:)`).
 - Decision (tuning, latency/quality trade-off):
-  - **`branchWidth` 8 → 4, `relativeCutoff` 8 → 6** as `DecodingConfiguration` defaults. The
-    remaining cost is dominated by a roughly fixed per-expansion overhead (~16 ms `llama_decode`
-    + ~16 ms logits readback + ~16 ms rank), so wall-clock scales nearly linearly with the
-    number of branch expansions. A `branchWidth` sweep (`testBranchWidthSweep`) showed warm
-    means of 955/639/423/288/168 ms at width 8/5/3/2/1, with the **top-ranked candidate
-    identical at every width** — the extra beams only contributed lower-ranked alternates.
-    Width 4 keeps a genuine multi-candidate ranked set while landing at **~554 ms warm mean**
-    (~22× faster than the original). The tighter cutoff prunes weak branches in confident
-    cases without affecting the dominant continuation.
+  - **`branchWidth` 8 → 4, `relativeCutoff` 8 → 6** as `DecodingConfiguration` defaults.
+    Per-completion latency scales nearly linearly with the number of branch expansions (each is
+    one ~16 ms `llama_decode`; the Swift work around it is negligible in release). A release
+    `branchWidth` sweep (`testBranchWidthSweep`) showed warm means of **239 / 164 / 107 / 75 /
+    43 ms** at width 8/5/3/2/1, with the **top-ranked candidate identical at every width** —
+    extra beams only add lower-ranked alternates. Width 4 keeps a genuine multi-candidate
+    ranked set at **~162 ms warm mean** (release). The tighter cutoff prunes weak branches in
+    confident cases without affecting the dominant continuation.
 - Consequences:
-  - Warm per-completion latency is now ~0.5 s and one-time model+profile load is ~0.5 s.
-    Usable for pause-triggered, cancellable autocomplete, though not yet "instant."
+  - **Release warm per-completion latency is ~162 ms** (p90 ~233 ms) at the tuned defaults,
+    with a one-time ~0.34 s model+profile load. That is already in the interactive range for
+    pause-triggered, cancellable autocomplete — no further structural work was required.
   - The `[TokenLogit]` shape of `LocalModelRuntime.logitsForNextToken()` is kept: the test
     stubs return *sparse* token lists (explicit ids, not dense vocab-indexed buffers), so the
-    sampler cannot assume `tokenID == bufferIndex`. A raw-buffer accessor that would merge the
-    logits readback and the rank scan into a single pass was therefore deferred.
-  - **Remaining bottleneck / next step.** Each branch independently re-`prepare`s
-    `basePrompt + branchTokens` (clear + full re-decode, forced by the recurrent-safe rule in
-    ADR-011) and pays the fixed `llama_decode` + vocab-readback overhead. The path to
-    sub-200 ms / approaching the model's standalone decode throughput is the deferred KV-fork:
-    keep `basePrompt` resident once and decode all sibling branches of a depth as a single
-    multi-sequence `llama_decode` batch (one fixed-overhead call per depth instead of per
-    branch). This must be validated against the Gated Delta Net / SSM layers (`seq_cp` of
-    recurrent state) before adoption — see ADR-010/011.
-  - Benchmarks live as skip-gated tests in `QualitativeDemoTests`
-    (`testPhaseBreakdown`, `testCompletionLatency`, `testBranchWidthSweep`) so the numbers are
-    reproducible and regressions are visible whenever the model + profile are provisioned.
+    sampler cannot assume `tokenID == bufferIndex`. A raw-buffer accessor is unnecessary in
+    release anyway (the readback is ~0.04 ms).
+  - Benchmarks live as skip-gated tests in `QualitativeDemoTests` (`testPhaseBreakdown`,
+    `testCompletionLatency`, `testBranchWidthSweep`); run them with `-c release` for meaningful
+    numbers.
+- KV-fork investigation (rejected). The deferred idea — keep `basePrompt` resident once and
+  expand a whole beam frontier in one multi-sequence `llama_decode` (via `llama_memory_seq_cp`)
+  instead of re-`prepare`-ing each branch — was prototyped and measured, then **rolled back**:
+  - The fork is *correct enough*: a `seq_cp` fork reproduces a fresh decode to the same
+    accuracy as plain incremental (split-batch) decode (max-abs logit diff ~0.12, **top-5
+    tokens unchanged**); `seq_cp` adds no error beyond the split. The ~0.12 divergence is the
+    hybrid model's split-vs-unified batch behaviour in its recurrent layers, not a fork bug.
+    (`llama_model_is_recurrent` returns `false` for this hybrid model even though it allocates a
+    `llama_memory_recurrent` buffer — don't trust that flag.)
+  - But it is **not worth it**: in release we are already at ~162 ms. Batching would cut decode
+    calls (~13 → ~5 for a depth-4 width-4 beam) for maybe ~80 ms more, at the cost of
+    ~300 MB of resident recurrent-state buffers (`n_seq_max` × ~19 MB/seq on this model), a
+    behavioural change (the 0.12 split/fork divergence vs today's exact full re-decode), and
+    significant sequence-management complexity. Revisit only if a future model/host needs it.
+
+## ADR-013 — Context-aware sentence-boundary stop (M5)
+
+- Date: 2026-05-30
+- Status: accepted
+- Context: Qualitative testing of longer completions showed the `.stopAndDisplay` sentence-end
+  stop truncating useful continuations: `"To make a good cup of coffee, you"` returned
+  `" need 1."` — the model had started a numbered list and the period after `1` was taken as a
+  sentence end. The `.sentenceEnd` flag is set per-token by `TokenClassifier.containsSentenceEnd`
+  on any token whose text contains `.`/`?`/`!`/`…`/closing quote, which is inherently
+  context-free and so fires on decimals, list markers (`1.`), and abbreviations (`Mr.`, `e.g.`).
+- Decision: keep the per-token flag (the profile can't see context), but disambiguate in the
+  engine, which has the generated text. New `SentenceBoundary.isTerminal(_:)` is consulted only
+  for tokens the profile flagged as sentence ends; when it judges the boundary *false*, the
+  engine treats the step as `continueGeneration` instead of `stopAndDisplay`, so the branch keeps
+  going. It rejects: a digit immediately before the period (decimals / numbered lists), a small
+  abbreviation set (`Mr./Dr./e.g./i.e./etc./U.S./a.m.` …, plus month/day abbreviations), and a
+  single uppercase initial (`J.`). `?`, `!`, `…` stay unambiguous. It is deliberately
+  conservative — anything it can't confidently reject stays a real boundary, preserving the
+  decoder's bias toward stopping early. The engine passes `prompt.suffix(32) + branch.text` so a
+  boundary can be judged against context that began in the prompt.
+- Consequences:
+  - The coffee prompt now completes `" need 2 cups of water and 1 cup of coffee grounds."`;
+    genuine sentence ends (`"…named Lily."`) still stop, and all other example completions are
+    unchanged.
+  - Pure, table-driven logic with unit tests (`SentenceBoundaryTests`); no model dependency.
+
+### Multilingual compatibility (revisited 2026-05-30)
+
+The first cut handled only the ASCII terminators, which meant two distinct gaps for non-English
+text. Both are now closed:
+
+1. **The flag never fired for non-Latin scripts.** `TokenClassifier.containsSentenceEnd` only
+   matched `.?!…` and closing quotes, so a Japanese `。`, a Chinese `！/？`, a Hindi danda `।/॥`,
+   an Arabic `۔/؟`, or an Armenian/Ethiopic full stop (`։`/`።`) was never flagged — those
+   languages got *no* sentence-end stop at all (only EOS / width / max-tokens). The terminator set
+   now includes the CJK ideographic + fullwidth/halfwidth stops, Devanagari danda, Arabic stop /
+   question mark, Armenian/Ethiopic stops, Myanmar section marks, and the Greek question mark. The
+   ideographic comma `、` and Arabic comma `،` are deliberately excluded (clause separators, not
+   terminators). This required a **profile rebuild** (flags are baked in at build time); the
+   tokenizer-bytes digest is unchanged, so the M4/M5 digest gate still matches.
+2. **The disambiguator only needs to special-case the Latin `.`.** The non-Latin terminators
+   above are not overloaded with a decimal/abbreviation meaning, so `SentenceBoundary` now treats
+   them (and `?`/`!`/`…`) as unambiguous *terminal* via `isUnambiguousTerminator`. Only `.`
+   gets context analysis. That analysis already generalises well:
+   - the digit-before-period rule uses Unicode-aware `isNumber`, so it also covers German/European
+     ordinals (`am 3.`), Arabic-Indic / Devanagari / fullwidth digits, and decimals;
+   - the abbreviation set was extended with the common German/French/Spanish/Italian abbreviations
+     (`z.B.`, `usw.`, `d.h.`, `p.ex.`, `cf.`, `Sr.` …) that share the Latin period;
+   - the uppercase-initial rule only fires for cased scripts, which is correct — CJK / Arabic /
+     Hebrew / Devanagari have no case and never write an abbreviation as `<letters>.` mid-sentence.
+
+   Trailing-wrapper trimming also learned the CJK/fullwidth closers (`」』）］`, ideographic
+   space) so a terminator hidden behind them is still seen.
+
+   The abbreviation list stays best-effort: a missed abbreviation only falls back to the prior
+   "treat as a real boundary" behaviour (an early stop), never a wrong suggestion, which matches
+   the product's *prefer suppression to a wrong completion* principle. Covered by new
+   `SentenceBoundaryTests` (CJK/Hindi/Arabic/Urdu terminals, German ordinals, non-English
+   abbreviations) and `ClassifierFlagTests` (non-Latin terminators flagged, `、` not).
+
+## ADR-014 — Multilingual robustness of the completion pipeline (M5)
+
+- Date: 2026-05-30
+- Status: accepted
+- Context: After fixing the sentence-boundary stop (ADR-013) the rest of the live completion path
+  was audited end-to-end for Latin/ASCII assumptions. Most of it is already script-neutral —
+  `PromptBuilder` truncates on grapheme boundaries with binary search; `TokenClassifier` word
+  detection uses Unicode `isAlphabetic`/`isNumber` (so CJK ideographs are word characters);
+  `UTF8Scanner` already distinguishes a *pending* multi-byte tail from a malformed one; the trie /
+  required-prefix logic is byte-level; `BiasPolicy` only adds small nudges that the model logits
+  dominate. Two real defects surfaced in the constrained decoder's `GenerationBranch`, plus one
+  inherent unit mismatch worth recording.
+- Decision:
+  1. **Display width is now the grapheme-cluster delta of the decoded text, not a per-token width
+     sum.** The old code preferred the profile's per-token `displayWidth` (a grapheme count of the
+     token's *own* text). Summed across tokens that share a cluster this over-counts and trips the
+     `maxDisplayWidth` cap early for non-Latin text in three ways: (a) combining marks
+     (Arabic/Hebrew/Devanagari/Thai vowel signs & tone marks) attach to the previous cluster and
+     should add 0 columns; (b) bytes that only partially complete a multi-byte character should add
+     0 until the cluster closes; (c) a byte-fallback CJK/Indic character split across several
+     single-byte tokens should count once, not once per byte. `extending(...)` now adds
+     `max(charDelta, 0)` where `charDelta = newText.count - text.count`, which is correct for all
+     three. The `profileWidth` parameter was dropped.
+  2. **A branch with a merely *pending* trailing multi-byte sequence is now emittable** (it emits
+     its maximal valid-UTF-8 prefix). Previously `isCompleteAndValid` required fully-valid bytes,
+     so a byte-fallback character that straddled the token-depth cap caused the *entire* branch to
+     be dropped — for some scripts that meant no completion at all. We only ever insert `text`
+     (complete characters); the partial tail is silently discarded. A genuinely malformed
+     (`.invalid`) sequence is still rejected.
+- Consequences:
+  - Non-Latin completions are no longer truncated or suppressed by width/finalization artefacts.
+    English behaviour is unchanged (whole-character tokens always have `charDelta == profileWidth`
+    and never finalize on a pending tail). Covered by new `ConstrainedGenerationEngineTests`
+    (byte-fallback CJK width, combining-mark zero width, pending-prefix emission).
+  - **Known, deliberately-unpatched limitation:** `maxCompletionTokens` (default 4) is a *token*
+    budget, and tokens-per-character varies hugely by script (Latin ≈ a few chars/token, CJK ≈ 1
+    char/token, byte-fallback scripts ≈ ⅓ char/token). So "4 tokens" is several words of English
+    but only ~1 character of an uncovered script. Reinterpreting the cap as graphemes would break
+    the product's stated token contract for Latin text, so the cap stays a token count; choosing a
+    script-appropriate value belongs at request-construction time (future app wiring, once
+    language detection feeds the request) rather than in the decoder.
+  - Languages whose sentences are delimited by spacing rather than punctuation (e.g. Thai) still
+    only stop via EOS / width / max-tokens — there is no terminator to key the sentence-end stop
+    on. Left as-is to avoid false stops (see ADR-013).
+
+## ADR-015 — Current-word typo guard inside the beam (M5)
+
+- Date: 2026-05-30
+- Status: accepted
+- Context: Qualitative testing of a mid-word completion (`"…see you tom"`) surfaced a ranking defect:
+  the misspelled `"orow."` (→ *tomorow*) out-scored the correct `"orrow."` (→ *tomorrow*) because
+  the typo splits into commoner sub-tokens whose summed log-probability beats the single rarer
+  `"orrow"` token. Length/score normalisation cannot fix this — the typo wins on raw, per-token,
+  and per-character probability — so the fix has to be a *quality* gate, not a re-weighting. The
+  architecture already reserved a slot for it (`SuppressionReason.currentWordLooksLikeTypo`, the
+  "typo guard" output filter in `docs/01`).
+- Decision: a `CurrentWordTypoGuard` that drops a branch the moment the word the user is completing
+  *closes* into a misspelling. It is consulted **inside the beam**, not as an end-of-run filter, for
+  two reasons that map directly to the requirement "when the typo is fixed, the following
+  predictions must adjust":
+  1. An end filter would let the typo branch spend beam budget generating its *continuation*
+     tokens, all conditioned on the wrong word; and
+  2. the correctly-spelled branch could be pruned by the typo's higher score before it is ever
+     finalised.
+  Judging the word the instant it closes discards the typo branch then and there, so every later
+  token is only ever explored from correctly-spelled context. We never rewrite letters in a
+  finished string — we keep the alternative branch whose tokens were generated under the correct
+  spelling.
+  - Dictionary lookups go through a new `WordRecognizing` protocol in `AutocompleteCore` (kept
+    AppKit-free); the concrete `SystemWordRecognizer` wraps `NSSpellChecker` in the app target and
+    is wired via `KeyTypeModuleGraph.makeCompletionEngine`. With no recogniser injected the guard is
+    inert, so existing behaviour/tests are unchanged.
+- No-false-positive posture (the explicit requirement): the guard only ever flags a word when **all**
+  of these hold, and is otherwise silent —
+  - the word is *closed* (a boundary follows it); a still-growing word is a valid prefix and is
+    never judged;
+  - the user actually typed a stem at the cursor and the model added letters to it (a completion
+    that starts a fresh word after a space is the model's own and is left alone);
+  - the word is all-lowercase and letters-only (with intra-word `'`/`-`), which skips proper nouns,
+    sentence-initial capitals, ACRONYMS, camelCase identifiers, and anything with digits;
+  - the mode is `.prose`/`.correction` (never `.code`/`.terminal`);
+  - the word does **not** already appear verbatim in the surrounding prefix/suffix — a term the
+    user is already using is a personal-dictionary entry, not a typo (requirement 3);
+  - and the recogniser, which is itself conservative (returns "recognised" for unknown languages /
+    scripts without a dictionary), reports it misspelled. The recogniser is language-aware
+    (`context.detectedLanguage`), consistent with ADR-013/014.
+- Consequences:
+  - The reported case now returns `"orrow."`; the misspelling is dropped before it can be ranked
+    or before its continuation is explored. Covered by `ConstrainedGenerationEngineTests`
+    (typo dropped vs. the no-guard control, context-term kept, open-word-at-cap not flagged, code
+    mode skipped, capitalised word not flagged).
+  - Lookups are cached per generation and only happen when a word closes (rare vs. per-token
+    decode), and hop to the main actor for `NSSpellChecker`; negligible against decode cost.
+  - Scope is intentionally the *current* (cursor-anchored) word — the one fused with the user's
+    typed stem and the most error-prone under required-prefix constraints. Words generated entirely
+    within the completion are left to the model (extending the guard to them is possible but raises
+    false-positive surface for little gain).
+
+## ADR-016 — Candidate filtering, inline overlay, real insertion, Tab acceptance → MVP (M6)
+
+- Date: 2026-05-30
+- Status: accepted
+- Context: M5 produced ranked on-device candidates but nothing reached the screen or the field. M6 is
+  the gated MVP: assemble the first end-to-end Tab-accept slice in TextEdit — output filtering over
+  the full `SuppressionReason` taxonomy, an inline ghost-text overlay at the caret, real keystroke
+  insertion with clipboard preservation, and a global Tab/Shift+Tab hotkey — wired against the
+  already-working Qwen runtime + ACPF profile. Prioritised a working vertical slice over breadth.
+- Decisions:
+  - **Filter placement.** `DefaultCandidateFilter: CandidateFiltering` lives in `ConstrainedGeneration`,
+    not a new package, because it needs the `AppCompatibility` policy table and the `AutocompleteCore`
+    contract — both already linked there — and adding a package would mean new `.pbxproj` references
+    for no isolation benefit. It returns the first matching `SuppressionReason`, checking, in order:
+    app/policy gates (`completionsDisabled`, `midLineCompletionDisabled` when text follows the cursor,
+    `tabShortcutsDisabled`), `noCandidate` (empty), `invalidUTF8` (residual U+FFFD — a `String` is
+    already well-formed, the decoder drops malformed bytes upstream), `requiredPrefixNotSatisfied`
+    (consistency with the demanded prefix bytes, mirroring the decoder's admissibility invariant),
+    `displayWidthExceeded`, `maxCompletionLengthExceeded`, `insertionUnsafe` (whitespace-only or any
+    C0/DEL control char), and finally `currentWordLooksLikeTypo`. Most reasons are *also* enforced
+    in-beam; the filter is a cheap, deterministic, independently-tested last gate so the UI stays dumb.
+  - **Synchronous typo seam.** `CandidateFiltering` is synchronous but `WordRecognizing` (ADR-015) is
+    `async` (main-actor `NSSpellChecker`). Rather than make the filter async, a `SynchronousWordRecognizing`
+    seam can be injected; `NSSpellChecker`'s check is itself synchronous so a main-actor app could supply
+    it. In the live app the seam is left nil — the in-beam guard (ADR-015) is the primary, sufficient
+    typo defence and wiring it twice would only double spell-checks. The output net is fully covered by
+    tests regardless.
+  - **Overlay.** Reuse the proven Red Dot `NSPanel` recipe (already ported in `CaretDebugOverlayWindow`):
+    borderless `.nonactivatingPanel`, `.canJoinAllSpaces`, `ignoresMouseEvents`, `.screenSaver` level,
+    clear background. `GhostTextOverlayWindow` hosts `GhostTextView` (`.secondary` text in the field's
+    font, single line) sized to the measured string and pinned **inline at the caret** (LTR starts at
+    the caret's right edge, RTL ends at its left edge; vertical extent matches the caret, shifted by the
+    policy `verticalOffset`). `InlineGhostTextPresenter` owns the window. `OverlayPlacement` stays
+    AppKit-free; the resolved `NSFont` is passed on the `show` path (protocol gained a `font:` parameter
+    with a nil-defaulting convenience overload). Font is read best-effort from AX
+    (`kAXAttributedStringForRange` over a 1-char probe at the caret in `FieldFontResolver`), falling back
+    to a system font sized from the caret height.
+  - **Insertion.** `PasteboardCompletionInserter.insert(plan:)` is real, behind two testable seams:
+    `KeystrokeSynthesizing` (the real `CGEventKeystrokeSynthesizer` posts ⌘V / ⌘⌥⇧V / Unicode strings /
+    backspace) and `CompletionPasteboard` (the real `SystemPasteboard` snapshots items by copying their
+    per-type data — re-adding read item objects is unreliable). Order for pasteboard strategies:
+    `save → write → paste[/match-style] → optional backspace → restore`. The clipboard is restored after
+    a short delay (default 120 ms) so the target app reads it before we put the user's content back —
+    a heuristic timing trade-off (tunable; injection strategies skip the pasteboard entirely). Strategy
+    dispatch: `pasteboardPaste`/`pasteAndMatchStyle` (clipboard), `chunkedStringInjection`/`characterInjection`
+    (direct Unicode keystrokes, per chunk/char), `firstWordOnly` (truncate then paste). The non-breaking-space
+    workaround is applied by the planner before dispatch.
+  - **Tab acceptance.** `CompletionAcceptanceController` installs a `CGEvent.tapCreate` **session** tap on
+    keyDown. It consumes Tab *only* when a completion is visible **and** `policy.allowsTabAcceptance`; Tab
+    accepts the **next word**, Shift+Tab the **full** string, and everything else (no completion,
+    ⌘/⌥/⌃-Tab, non-Tab keys, a disabled tap) passes straight through so native Tab is untouched. The C
+    callback re-enters the main actor via `MainActor.assumeIsolated` (the tap is on the main run loop).
+    Multilingual "next word" is `NextWordSplitter` (in `AutocompleteCore`): ICU word boundaries via
+    `enumerateSubstrings(.byWords)` — head = up to the *second* word's start, so leading/trailing space
+    travels with the accepted word; space-less scripts (CJK/Thai) the system segments are walked
+    correctly, and a single-word string is accepted wholesale.
+  - **Orchestration & linking.** `CompletionController` (`@MainActor @Observable`) loads the runtime +
+    profile + engine **off the main actor** (a `nonisolated` builder `await`ed from a `Task`; the actor
+    `LlamaModelRuntime` keeps decode off-main) and degrades gracefully (status shown, completions off)
+    when assets are missing. It subscribes to the shared `AccessibilityContextTracker`, and on each change
+    cancels the in-flight generation `Task`, builds the prompt + request, generates, filters, and
+    shows/hides the overlay; it also exposes the acceptance API. The `LlamaModelRuntime` product is now
+    linked into the app target and a `KeyType.entitlements` adds
+    `com.apple.security.cs.disable-library-validation` (hardened runtime is on and the llama framework is
+    dynamic). A "Completions enabled" toggle + model status were added to the menu bar.
+- Consequences:
+  - End-to-end works in TextEdit: typing shows ghost text in the field's font; Tab inserts the next word
+    and restores the clipboard; wrong/long/mid-line-colliding candidates show nothing.
+  - New tests, all green and deterministic (no model/AppKit needed): `CandidateFilterTests` (every
+    taxonomy case + pass-through), `CompletionUITests` (placement nil-rect, presenter visible-state, font
+    resolution), `TextInsertionTests` (planner selection + inserter dispatch/ordering via a recording
+    mock), `NextWordSplitterTests` (multilingual).
+  - Watch-items: embedding/signing the dynamic `llama.framework` under hardened runtime (first link may
+    need a clean build); the Tab tap must never swallow Tab with no completion visible; the pasteboard
+    restore delay is a heuristic — tune per app if a target misses the paste.
 

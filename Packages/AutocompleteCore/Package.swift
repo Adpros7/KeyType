@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "AutocompleteCore", targets: ["AutocompleteCore"])
     ],
     targets: [
-        .target(name: "AutocompleteCore")
+        .target(name: "AutocompleteCore"),
+        .testTarget(name: "AutocompleteCoreTests", dependencies: ["AutocompleteCore"])
     ]
 )

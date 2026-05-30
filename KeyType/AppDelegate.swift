@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import MacContextCapture
 import SwiftUI
 
 @MainActor
@@ -14,8 +15,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let hasCompletedOnboardingDefaultsKey = "KeyType.hasCompletedOnboarding"
 
     let permissions = PermissionsManager()
-    let contextCapture = ContextCaptureController()
+    // One AX tracker feeds both the (debug) context capture and the live completion pipeline.
+    private let tracker: AccessibilityContextTracker
+    let contextCapture: ContextCaptureController
+    let completion: CompletionController
+    private let acceptance = CompletionAcceptanceController()
     private var permissionSyncTimer: Timer?
+
+    override init() {
+        let tracker = AccessibilityContextTracker()
+        self.tracker = tracker
+        self.contextCapture = ContextCaptureController(tracker: tracker)
+        self.completion = CompletionController(tracker: tracker)
+        super.init()
+        acceptance.completionController = completion
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Background / agent app: no dock icon. LSUIElement in Info.plist already suppresses the
@@ -49,8 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func syncContextCaptureWithPermission() {
         if permissions.accessibility.isGranted {
             contextCapture.start()
+            completion.start()
+            acceptance.start()
         } else {
             contextCapture.stop()
+            completion.stop()
+            acceptance.stop()
         }
     }
 

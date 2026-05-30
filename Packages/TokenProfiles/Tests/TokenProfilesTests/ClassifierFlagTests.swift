@@ -108,6 +108,21 @@ final class ClassifierFlagTests: XCTestCase {
         XCTAssertTrue(classify(u8("?!")).flags.contains(.sentenceEnd))
     }
 
+    func testNonLatinTerminatorsAreSentenceEnd() {
+        // Sentence-end stop must fire beyond Latin scripts.
+        for terminator in ["。", "！", "？", "।", "॥", "۔", "؟", "։", "።"] {
+            XCTAssertTrue(
+                classify(u8(terminator)).flags.contains(.sentenceEnd),
+                "expected sentenceEnd for '\(terminator)'"
+            )
+        }
+    }
+
+    func testNonTerminalCJKPunctuationIsNotSentenceEnd() {
+        // The ideographic comma 、 separates clauses but does not end a sentence.
+        XCTAssertFalse(classify(u8("、")).flags.contains(.sentenceEnd))
+    }
+
     // MARK: - Chat markers
 
     func testIMStartChatMarker() {

@@ -167,3 +167,20 @@ public protocol CandidateFiltering {
         request: CompletionRequest
     ) -> SuppressionReason?
 }
+
+/// Language-aware dictionary lookup used by the constrained decoder's current-word typo guard.
+///
+/// The guard reconstructs the word the user is *completing* — the stem already typed at the cursor
+/// plus the model's continuation up to the next word boundary — and asks whether it is a real word.
+/// A `false` answer lets the engine drop that branch mid-search so the beam spends its budget on
+/// correctly-spelled continuations instead (see ADR-015).
+///
+/// Implementations MUST be conservative: return `true` whenever unsure (unknown language, no
+/// dictionary for the script, proper nouns, etc.) so the guard never suppresses a legitimate
+/// completion. The macOS implementation wraps `NSSpellChecker` and therefore lives in the app
+/// layer; `AutocompleteCore` stays free of AppKit.
+public protocol WordRecognizing: Sendable {
+    /// `true` when `word` is recognised for `language` (an `NSSpellChecker` language id such as
+    /// `"en"` / `"en_US"`, or `nil` to let the implementation auto-detect). Conservative on doubt.
+    func recognizes(_ word: String, language: String?) async -> Bool
+}

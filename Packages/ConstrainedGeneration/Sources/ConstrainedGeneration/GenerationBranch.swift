@@ -12,7 +12,7 @@ struct GenerationBranch: Equatable {
     var bytes: [UInt8]
     /// Decoded text = the maximal valid-UTF-8 prefix of `bytes`.
     var text: String
-    /// Cumulative display width (sum of per-token width, with a char-count fallback).
+    /// Cumulative display width, measured as grapheme clusters of the decoded `text`.
     var displayWidth: Int
     /// Cumulative log-probability (sum of per-token log-probs). Larger is better.
     var score: Float
@@ -39,12 +39,11 @@ struct GenerationBranch: Equatable {
         case overWidth
     }
 
-    /// Produce the branch that results from emitting `tokenID` (with raw `tokenBytes`,
-    /// per-token `profileWidth`, and `logProbability`), or a reason it must be dropped.
+    /// Produce the branch that results from emitting `tokenID` (with raw `tokenBytes` and
+    /// `logProbability`), or a reason it must be dropped.
     func extending(
         withToken tokenID: TokenID,
         bytes tokenBytes: [UInt8],
-        profileWidth: Int,
         logProbability: Float,
         maxDisplayWidth: Int
     ) -> Extension {
@@ -60,9 +59,15 @@ struct GenerationBranch: Equatable {
             return .invalidUTF8
         case let .valid(validByteCount), let .pending(validByteCount):
             let newText = String(decoding: newBytes[0..<validByteCount], as: UTF8.self)
+            // Display width advances by the *grapheme-cluster* delta of the decoded text, not by a
+            // per-token width sum. This is the language-fair measure: a combining mark
+            // (Arabic/Devanagari/Hebrew/Thai vowel signs and tone marks) attaches to the previous
+            // cluster and adds 0 columns; bytes that only partially complete a multi-byte character
+            // add 0 until the cluster closes; and a byte-fallback CJK character split across several
+            // single-byte tokens is counted once when it completes, not once per byte. (A per-token
+            // sum over-counts all three and truncates non-Latin completions early.)
             let charDelta = newText.count - text.count
-            let widthAdd = profileWidth > 0 ? profileWidth : Swift.max(charDelta, 0)
-            let newWidth = displayWidth + widthAdd
+            let newWidth = displayWidth + Swift.max(charDelta, 0)
             if newWidth > maxDisplayWidth {
                 return .overWidth
             }
@@ -77,12 +82,21 @@ struct GenerationBranch: Equatable {
         }
     }
 
-    /// `true` iff the branch is emittable as-is: non-empty text, the required prefix is
-    /// satisfied, and there is no incomplete trailing multi-byte sequence.
+    /// `true` iff the branch is emittable: it has decoded text and the required prefix is
+    /// satisfied. A merely *pending* trailing multi-byte sequence is fine — `text` already holds
+    /// only the maximal valid-UTF-8 prefix, so we emit the complete characters and silently drop
+    /// the partial tail. This matters for byte-fallback scripts (a CJK/Thai/Indic character split
+    /// across single-byte tokens) where a branch can hit the token-depth cap mid-character;
+    /// without this it would be dropped entirely and the user would get no completion at all.
+    /// Only a genuinely malformed sequence (`.invalid`) disqualifies a branch.
     var isCompleteAndValid: Bool {
         guard prefixSatisfied, !text.isEmpty else { return false }
-        if case .valid = UTF8Scanner.scan(bytes) { return true }
-        return false
+        switch UTF8Scanner.scan(bytes) {
+        case .valid, .pending:
+            return true
+        case .invalid:
+            return false
+        }
     }
 
     /// Returns the remaining required prefix after consuming `tokenBytes`, or `nil` if the

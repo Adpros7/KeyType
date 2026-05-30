@@ -89,15 +89,21 @@ ADR-010): a deterministic best-first **multi-branch** search honouring `branchWi
 shaping with cumulative log-probability scoring (`TokenSampler`); required-prefix + byte/trie
 admissibility from the profile (`tokenAllowed(_:afterRequiredPrefix:)`, advanced per branch);
 incremental UTF-8-validated detokenization (`GenerationBranch` + `UTF8Scanner`); and stop on
-EOS/EOT, `.stopAndSuppress`, sentence-end (`.stopAndDisplay`), display-width limit,
-`maxCompletionTokens`, or an inadmissible transition. It drives the linear `LocalModelRuntime`
+EOS/EOT, `.stopAndSuppress`, sentence-end (`.stopAndDisplay`, disambiguated against context by
+`SentenceBoundary` so `1.`/`Mr.`/`e.g.` don't truncate — ADR-013), display-width limit,
+`maxCompletionTokens`, or an inadmissible transition. A `CurrentWordTypoGuard` drops a branch the
+instant the user's current word *closes* into a misspelling (via the injected `WordRecognizing` /
+`NSSpellChecker`), inside the beam so the correctly-spelled branch isn't pruned and its
+continuation is the one that survives — conservative enough to avoid false positives
+(closed-word-only, lowercase letters-only, prose mode, context-term exempt; ADR-015). It drives the linear `LocalModelRuntime`
 protocol by re-`prepare`-ing `basePrompt + branchTokens` and honours cooperative `Task`
 cancellation so a newer keystroke aborts in-flight work. `TokenSampler` pre-selects the top
 candidates by raw logit before ranking so per-step work is bounded instead of vocabulary-wide,
-and the per-completion cost scales with the number of branch expansions, so `branchWidth`
-defaults to 4 (ADR-012, ~0.5 s warm per 4-token completion on the reference model). Because each
-divergent branch re-decodes the shared prefix (recurrent-safe, ADR-011), batching sibling
-branches into one multi-sequence decode (KV-fork) is the next latency optimization.
+and the per-completion cost scales with the number of branch expansions (each ~one
+`llama_decode`), so `branchWidth` defaults to 4 (ADR-012). **Measure in a release build**:
+debug inflates per-token Swift work by 1–2 orders of magnitude. In release the reference model
+runs ~213 tok/s and a 4-token completion is **~162 ms warm**. The multi-sequence KV-fork was
+investigated and rejected (already fast enough in release; see ADR-012).
 
 ### `TokenProfiles` — vocabulary intelligence ✅(in-memory) / 🟡(on-disk)
 `AutocompleteProfile` protocol + `InMemoryAutocompleteProfile` + `TokenProfileFlags` +
@@ -151,6 +157,27 @@ Porting notes:
 - Model decode is CPU/GPU-heavy → run off the main actor; marshal results back for UI.
 - The `LocalModelRuntime` protocol is `async`; keep generation cancellable (a newer keystroke
   must cancel an in-flight completion).
+
+## Debugging & observability
+
+- **Prediction log (check this first when triaging completion quality).** The running app writes a
+  human-readable, append-only log of every generation result and its acceptance status to
+  `~/Library/Application Support/KeyType/Logs/predictions.log`. It is **truncated on each launch**
+  (fresh ISO-timestamped header) and appended during the session; written off-main by
+  `PredictionLog` (`KeyType/PredictionLog.swift`), owned by `CompletionController`. Lines are
+  timestamped `HH:mm:ss.SSS`:
+  - `PREDICT ctx="…tail" ["a" | "b" | …] → SHOWN "a"` — best candidate shown as ghost text.
+  - `PREDICT ctx="…" [...] → SUPPRESS(<reason>)` — the `SuppressionReason` case the filter returned.
+  - `PREDICT ctx="…" → SUPPRESS(noCandidate)` — generation returned nothing.
+  - `ACCEPT(word) "<head>" of "<full>"` (Tab) / `ACCEPT(full) "<text>"` (Shift+Tab).
+
+  Only a short trailing slice of the typed context is recorded (the candidates are the model's own
+  output); the full path is also printed once to the unified log under category `prediction-log`.
+  Future agents: read this log to see what the model actually predicted, why a candidate was
+  suppressed, and whether the user accepted it — it is the fastest way to debug end-to-end behaviour.
+- Context capture is summarised to the unified log under category `context-capture` (deduped to one
+  line per change). The caret **debug overlay** (`CaretDebugOverlayWindow`) is off by default;
+  toggle it from the menu bar to visualise the resolved caret rect.
 
 ## Module dependency rules
 

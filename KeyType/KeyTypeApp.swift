@@ -17,6 +17,7 @@ struct KeyTypeApp: App {
             MenuBarView()
                 .environment(appDelegate.permissions)
                 .environment(appDelegate.contextCapture)
+                .environment(appDelegate.completion)
         } label: {
             Image(systemName: "text.cursor")
         }

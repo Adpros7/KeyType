@@ -139,9 +139,17 @@ generation cancels promptly on a new request.
 
 ---
 
-## M6 — Filtering, overlay, insertion → **MVP demo**  🟡
+## M6 — Filtering, overlay, insertion → **MVP demo**  ✅
 
-First end-to-end Tab-accept experience.
+First end-to-end Tab-accept experience. **Done** — see ADR-016. `DefaultCandidateFilter`
+(`ConstrainedGeneration`) covers the full `SuppressionReason` taxonomy; `InlineGhostTextPresenter`
++ `GhostTextOverlayWindow` (`CompletionUI`) render ghost text in the field's font at the caret;
+`PasteboardCompletionInserter` (`TextInsertion`) does real ⌘V/⌘⌥⇧V/chunk/char/first-word insertion
+with clipboard save+restore behind testable seams; `CompletionAcceptanceController` (`CGEvent`
+session tap) accepts next word on Tab / full string on Shift+Tab via the multilingual
+`NextWordSplitter`; `CompletionController` orchestrates capture→prompt→generate→filter→overlay
+against the live Qwen runtime + ACPF profile (`LlamaModelRuntime` linked + library-validation
+entitlement added).
 
 **Tasks**
 
