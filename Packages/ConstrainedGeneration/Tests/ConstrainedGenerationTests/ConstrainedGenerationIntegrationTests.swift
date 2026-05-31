@@ -12,7 +12,7 @@ import XCTest
 final class ConstrainedGenerationIntegrationTests: XCTestCase {
     private static let family = "qwen3-v151936"
 
-    private func makeEngine() throws -> ConstrainedGenerationEngine {
+    private func makeEngine(enableIncrementalBeam: Bool = true) throws -> ConstrainedGenerationEngine {
         try XCTSkipUnless(
             ModelContainer.defaultModelExists(),
             "Model file not present at \(ModelContainer.defaultModelFilename); skipping"
@@ -27,7 +27,9 @@ final class ConstrainedGenerationIntegrationTests: XCTestCase {
         let runtime: LlamaModelRuntime
         let profile: MmapAutocompleteProfile
         do {
-            runtime = try LlamaModelRuntime(modelURL: modelURL, contextLength: 1024)
+            runtime = try LlamaModelRuntime(
+                modelURL: modelURL, contextLength: 1024, enableIncrementalBeam: enableIncrementalBeam
+            )
             profile = try MmapAutocompleteProfile.open(
                 at: profileURL,
                 tokenizerVocabSize: runtime.metadata.vocabularySize,
@@ -69,6 +71,43 @@ final class ConstrainedGenerationIntegrationTests: XCTestCase {
         for candidate in candidates {
             XCTAssertFalse(candidate.text.isEmpty)
             XCTAssertLessThanOrEqual(candidate.displayWidth, request.maxDisplayWidth)
+        }
+    }
+
+    /// End-to-end quality gate for incremental beam decoding (ADR-046): the displayed (top)
+    /// completion must be identical whether the runtime decodes the beam incrementally or via the
+    /// ADR-043 reseed path. Run over several realistic prompts so a regression in resident-frontier
+    /// bookkeeping (wrong positions, stale fork state) would surface as a changed suggestion.
+    func testIncrementalBeamPreservesTopCompletion() async throws {
+        let incremental = try makeEngine(enableIncrementalBeam: true)
+        let reseed = try makeEngine(enableIncrementalBeam: false)
+
+        let prompts = [
+            "The capital of France is ",
+            "I am writing to let you know that the meeting tomorrow ",
+            "Thank you for your email. I will ",
+            "def add(a, b):\n    return ",
+            "The quick brown fox ",
+        ]
+
+        for prompt in prompts {
+            let context = TextFieldContext(
+                beforeCursor: prompt,
+                target: AppTarget(bundleIdentifier: "com.test.app", appName: "Test")
+            )
+            let request = CompletionRequest(
+                context: context, prompt: prompt, mode: .prose,
+                maxCompletionTokens: 4, maxDisplayWidth: 40
+            )
+            let incCandidates = try await incremental.completions(for: request)
+            let reseedCandidates = try await reseed.completions(for: request)
+
+            XCTAssertEqual(
+                incCandidates.first?.text, reseedCandidates.first?.text,
+                "top completion changed for prompt \(prompt.debugDescription): " +
+                "incremental=\(incCandidates.first?.text.debugDescription ?? "nil") " +
+                "reseed=\(reseedCandidates.first?.text.debugDescription ?? "nil")"
+            )
         }
     }
 

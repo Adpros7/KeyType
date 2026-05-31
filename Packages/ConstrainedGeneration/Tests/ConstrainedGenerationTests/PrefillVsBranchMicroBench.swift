@@ -16,9 +16,12 @@ import XCTest
 final class PrefillVsBranchMicroBench: XCTestCase {
     private static let family = "qwen3-v151936"
 
-    private func load() throws -> LlamaModelRuntime {
+    private func load(incremental: Bool = true) throws -> LlamaModelRuntime {
         try XCTSkipUnless(ModelContainer.defaultModelExists(), "GGUF missing; skipping")
-        return try LlamaModelRuntime(modelURL: try ModelContainer.modelURL(), contextLength: 2048, enableKVFork: true)
+        return try LlamaModelRuntime(
+            modelURL: try ModelContainer.modelURL(), contextLength: 2048,
+            enableKVFork: true, enableIncrementalBeam: incremental
+        )
     }
 
     private func openProfile(_ runtime: LlamaModelRuntime) throws -> MmapAutocompleteProfile {
@@ -100,6 +103,51 @@ final class PrefillVsBranchMicroBench: XCTestCase {
         print("==================================================================\n")
 
         await runtime.shutdown()
+    }
+
+    /// ADR-046 A/B: warm-path (cross-keystroke append) completion latency with incremental beam
+    /// decoding ON vs OFF (reseed). Simulates typing so each completion reuses the resident frontier
+    /// and decodes only one new token per branch per level. Run:
+    ///   swift test --package-path Packages/ConstrainedGeneration --filter testIncrementalWarmSpeedup -c release
+    func testIncrementalWarmSpeedup() async throws {
+        let target = AppTarget(bundleIdentifier: "com.apple.TextEdit", appName: "TextEdit", windowTitle: "Untitled")
+        let base = "I am writing to let you know that the meeting scheduled for tomorrow "
+        let words = ["afternoon", "has", "been", "moved", "to", "a", "later", "time", "so", "that", "everyone", "can"]
+
+        func warmRun(incremental: Bool) async throws -> (best: Double, mean: Double) {
+            let runtime = try load(incremental: incremental)
+            let profile = try openProfile(runtime)
+            let config = DecodingConfiguration(maxCandidates: 5, enableFillInMiddle: true)
+            let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profile, configuration: config)
+            func request(_ before: String) -> CompletionRequest {
+                let ctx = TextFieldContext(beforeCursor: before, afterCursor: "", target: target, detectedLanguage: "en")
+                let prompt = PromptBuilder().buildPrompt(context: ctx).prompt
+                return CompletionRequest(context: ctx, prompt: prompt, mode: .prose, maxCompletionTokens: 4, maxDisplayWidth: 60)
+            }
+            await runtime.resetKVCache()
+            _ = try await engine.completions(for: request(base)) // prime the anchor
+            var typed = base
+            var times: [Double] = []
+            for w in words {
+                typed += w + " "
+                let req = request(typed)
+                let s = try await seconds { _ = try await engine.completions(for: req) } * 1000
+                times.append(s)
+            }
+            await runtime.shutdown()
+            return (times.min() ?? 0, times.reduce(0, +) / Double(times.count))
+        }
+
+        // Run reseed first then incremental (then again, to discount any first-run kernel warmup).
+        _ = try await warmRun(incremental: false)
+        let off = try await warmRun(incremental: false)
+        let on = try await warmRun(incremental: true)
+
+        print("\n================ ADR-046 incremental beam: warm-path A/B ================")
+        print(String(format: "  reseed (incremental OFF) : best %.1f ms | mean %.1f ms", off.best, off.mean))
+        print(String(format: "  incremental (ON)         : best %.1f ms | mean %.1f ms", on.best, on.mean))
+        print(String(format: "  speedup (mean)           : %.2fx  (%.1f ms saved)", off.mean / on.mean, off.mean - on.mean))
+        print("========================================================================\n")
     }
 
     /// Records each `anchoredLogitsBatch` (one per beam level): how many branches, their suffix

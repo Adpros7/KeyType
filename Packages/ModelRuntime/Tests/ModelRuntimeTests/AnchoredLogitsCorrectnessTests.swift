@@ -161,6 +161,97 @@ final class AnchoredLogitsCorrectnessTests: XCTestCase {
         }
     }
 
+    /// Max absolute logit drift between two distributions over the union of their top tokens — the
+    /// quantitative form of the project's correctness envelope (ADR-012/018/043/046: ≤~0.12).
+    private func maxLogitDrift(_ p: [TokenLogit], _ q: [TokenLogit], over tokens: Set<TokenID>) -> Float {
+        let pm = Dictionary(uniqueKeysWithValues: p.map { ($0.tokenID, $0.logit) })
+        let qm = Dictionary(uniqueKeysWithValues: q.map { ($0.tokenID, $0.logit) })
+        var m: Float = 0
+        for t in tokens { m = max(m, abs((pm[t] ?? 0) - (qm[t] ?? 0))) }
+        return m
+    }
+
+    /// Gates incremental beam decoding (ADR-046): when consecutive `anchoredLogitsBatch` calls form a
+    /// beam frontier (each level's suffixes extend the previous level's by one token), the runtime
+    /// keeps each branch resident and decodes only the new token — extending in place for a 1-child
+    /// parent, forking via snapshot/restore for a split. Across a 3-level frontier that exercises
+    /// root forks, in-place extension, and a mid-beam split, the incremental logits must stay inside
+    /// the documented logit envelope of both the ADR-043 reseed path and a clean single-sequence
+    /// full decode.
+    ///
+    /// The bound is quantitative (max |Δlogit| over the top tokens) rather than a top-k *set* match:
+    /// on this hybrid recurrent model the multi-sequence batched decode already drifts up to ~0.12
+    /// from a sequential decode (ADR-043), enough to reorder — and for adversarial near-tied tokens,
+    /// re-set — ranks 3+. What must hold is that incremental adds no drift beyond that envelope; the
+    /// engine-level candidate-equality test covers argmax stability on realistic (well-separated)
+    /// continuations.
+    func testIncrementalFrontierWithinEnvelope() async throws {
+        try XCTSkipUnless(ModelContainer.defaultModelExists(), "Model file not present; skipping")
+        func make(_ incremental: Bool) throws -> LlamaModelRuntime {
+            try LlamaModelRuntime(
+                modelURL: try ModelContainer.modelURL(), contextLength: 2048,
+                enableKVFork: true, enableIncrementalBeam: incremental
+            )
+        }
+        let inc = try make(true)
+        let reseed = try make(false)
+        let tok = inc.tokenizer
+        let anchor = try tok.tokenize("The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is")
+
+        // A pool of distinct, valid token ids to assemble a well-formed frontier tree from. The
+        // tokens need not be likely continuations — every path scores whatever frontier we build.
+        let pool = try tok.tokenize(" one two three four five six seven eight nine ten")
+        try XCTSkipUnless(pool.count >= 8, "tokenizer produced too few tokens for the frontier")
+        let (a, b, c) = (pool[0], pool[1], pool[2])
+        let (x, y, z, w) = (pool[3], pool[4], pool[5], pool[6])
+        let extra = pool[7]
+
+        // Level 1 forks the root three ways; level 2 keeps `a`/`c` 1:1 (in-place extend) and splits
+        // `b` two ways (fork); level 3 extends every surviving branch 1:1.
+        let levels: [[[TokenID]]] = [
+            [[a], [b], [c]],
+            [[a, x], [b, y], [b, z], [c, w]],
+            [[a, x, extra], [b, y, extra], [b, z, extra], [c, w, extra]],
+        ]
+
+        // The batched path (reseed or incremental) already drifts from a sequential decode by the
+        // documented envelope; incremental must not exceed it, and must track reseed even tighter.
+        let envelope: Float = 0.12
+        let incVsReseedBound: Float = 0.06
+
+        // Start each beam at the root so the runtime resets any prior frontier, as the engine does.
+        _ = try await inc.anchoredLogitsBatch(anchor: anchor, suffixes: [[]])
+        _ = try await reseed.anchoredLogitsBatch(anchor: anchor, suffixes: [[]])
+
+        for (depth, suffixes) in levels.enumerated() {
+            let got = try await inc.anchoredLogitsBatch(anchor: anchor, suffixes: suffixes)
+            let expected = try await reseed.anchoredLogitsBatch(anchor: anchor, suffixes: suffixes)
+            XCTAssertEqual(got.count, suffixes.count)
+            for (i, suffix) in suffixes.enumerated() {
+                let truth = try await groundTruthLogits(try make(false), anchor: anchor, suffix: suffix)
+                let top = Set(topK(truth, 8) + topK(got[i], 8) + topK(expected[i], 8))
+                let incVsTruth = maxLogitDrift(got[i], truth, over: top)
+                let incVsReseed = maxLogitDrift(got[i], expected[i], over: top)
+                XCTAssertLessThanOrEqual(
+                    incVsTruth, envelope,
+                    "incremental level \(depth) branch \(i) (suffix \(suffix)) drifts \(incVsTruth) from full decode"
+                )
+                XCTAssertLessThanOrEqual(
+                    incVsReseed, incVsReseedBound,
+                    "incremental level \(depth) branch \(i) (suffix \(suffix)) drifts \(incVsReseed) from reseed"
+                )
+                // Argmax must still match the reseed path for well-separated branches (no near-tie).
+                let sorted = expected[i].sorted { $0.logit > $1.logit }
+                if sorted.count >= 2, sorted[0].logit - sorted[1].logit > envelope {
+                    XCTAssertEqual(
+                        argmax(got[i]), argmax(expected[i]),
+                        "incremental flipped a well-separated argmax at level \(depth) branch \(i)"
+                    )
+                }
+            }
+        }
+    }
+
     /// Disabling the flag falls back to the default full-decode path and must still be correct.
     func testDisabledForkMatchesFullDecode() async throws {
         let runtime = try makeRuntime(enableKVFork: false)

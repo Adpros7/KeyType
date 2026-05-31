@@ -39,6 +39,13 @@ public actor LlamaModelRuntime: LocalModelRuntime {
     /// restores that snapshot before decoding each branch's suffix — instead of re-prefilling the
     /// whole prompt per branch (see ADR-018). Gated so it can be disabled if ever incorrect.
     private nonisolated let enableKVFork: Bool
+    /// When true, consecutive `anchoredLogitsBatch` calls that form a beam frontier (each level's
+    /// suffixes are one-token extensions of the previous level's) keep every branch's KV state
+    /// resident and decode only the *new* token per branch — extending a sequence in place, or
+    /// forking it (snapshot/restore) only when a branch splits — instead of reseeding the anchor and
+    /// re-decoding the whole suffix every level (ADR-046). Falls back to the ADR-043 reseed path for
+    /// any call whose parents are not resident, so correctness never depends on the fast path.
+    private nonisolated let enableIncrementalBeam: Bool
     /// Number of distinct sequences the context can hold simultaneously (`n_ctx_params.n_seq_max`).
     /// This is the most beam branches `anchoredLogitsBatch` can expand in a single `llama_decode`;
     /// it bounds the resident per-sequence recurrent-state buffers (~19 MB each on this model), so
@@ -46,6 +53,11 @@ public actor LlamaModelRuntime: LocalModelRuntime {
     private nonisolated let maxSequences: Int
     /// The single sequence the runtime decodes into.
     private nonisolated let anchorSeq: llama_seq_id = 0
+    /// Incremental-beam frontier (ADR-046): maps a resident branch *suffix* to the sequence id whose
+    /// KV holds `anchor + suffix`. Valid only across consecutive `anchoredLogitsBatch` calls on the
+    /// same anchor; any other decode path invalidates it via `invalidateFrontier()`. The empty
+    /// suffix (root) is implicit — its state is `anchorSnapshot`, so it is never stored here.
+    private var frontier: [[TokenID]: Int] = [:]
     /// Tokens whose post-decode sequence state is captured in `anchorSnapshot`.
     private var anchorTokens: [TokenID] = []
     /// Serialized seq-0 state (`llama_state_seq_get_data`) immediately after decoding `anchorTokens`.
@@ -78,7 +90,10 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         // On this hybrid model the parallel (split) recurrent path reorders near-tied logits by ~0.12
         // vs a lone single-sequence decode (same envelope ADR-012/018 already accepted: identical
         // argmax and top-k set, only ranks 3+ of near-ties shuffle).
-        maxSequences: Int = 4
+        maxSequences: Int = 4,
+        // Incremental beam decoding (ADR-046): keep branch KV resident across levels and decode only
+        // the new token. On by default; the reseed path (ADR-043) remains as a per-call fallback.
+        enableIncrementalBeam: Bool = true
     ) throws {
         guard ModelContainer.modelExists(at: modelURL) else {
             throw LlamaRuntimeError.modelFileMissing(path: modelURL.path)
@@ -136,6 +151,7 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         self.reuseThreshold = max(0, reuseThreshold)
         self.nBatch = Int(llama_n_batch(loadedCtx))
         self.enableKVFork = enableKVFork
+        self.enableIncrementalBeam = enableIncrementalBeam
         self.maxSequences = Int(llama_n_seq_max(loadedCtx))
         self.metadata = ModelMetadata(
             identifier: modelURL.lastPathComponent,
@@ -171,6 +187,8 @@ public actor LlamaModelRuntime: LocalModelRuntime {
     // MARK: - LocalModelRuntime
 
     public func prepare(promptTokens: [TokenID]) async throws {
+        // `prepare` decodes into / clears seq 0, which may back a resident beam frontier — drop it.
+        invalidateFrontier()
         guard !promptTokens.isEmpty else {
             llama_memory_clear(memory, true)
             currentTokens = []
@@ -259,6 +277,7 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         anchorTokens = []
         anchorSnapshot = nil
         anchorEndLogits = nil
+        invalidateFrontier()
     }
 
     // MARK: - Anchored KV reuse (ADR-018)
@@ -294,7 +313,9 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         }
 
         // 3. Branch: restore the anchor snapshot (discards any previous branch's suffix from the
-        //    sequence) and decode just this branch's suffix.
+        //    sequence) and decode just this branch's suffix. This rewrites seq 0, so any resident
+        //    beam frontier is now stale.
+        invalidateFrontier()
         try restoreAnchor()
         try decodeTokens(suffix, startingAt: anchor.count, seqID: anchorSeq)
         currentTokens = anchor + suffix
@@ -326,6 +347,11 @@ public actor LlamaModelRuntime: LocalModelRuntime {
 
         var results = [[TokenLogit]](repeating: [], count: suffixes.count)
 
+        // A root (empty) suffix marks the start of a fresh beam, so any frontier left resident by a
+        // previous completion on this same anchor (where `ensureAnchor` took its no-op fast path) is
+        // stale — drop it before this beam builds its own.
+        if suffixes.contains(where: \.isEmpty) { invalidateFrontier() }
+
         // Empty-suffix (root) branches reuse the cached anchor-end logits — no decode needed, and
         // always valid even after a sibling branch overwrote the live logits buffer.
         var pending: [(index: Int, suffix: [TokenID])] = []
@@ -338,19 +364,31 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         }
         guard !pending.isEmpty else { return results }
 
-        // How many branches can share the cache at once: bounded by `n_seq_max` and by the cell
-        // budget (each seeded sequence holds its own copy of the anchor, so total cells ≈
-        // seqs × (anchor + suffix) must fit in n_ctx). Falls back to 1 (purely sequential) for very
-        // long prompts, so correctness never depends on the prompt fitting many times over.
+        // Fast path (ADR-046): if every branch's parent (`suffix.dropLast()`) is resident from the
+        // previous level, decode only each branch's new token in its parent's sequence — extending
+        // in place, forking on a split. Returns false (no state mutated) if not satisfiable.
+        if enableIncrementalBeam, try incrementalFrontierBatch(anchor: anchor, pending: pending, into: &results) {
+            currentTokens = anchor
+            return results
+        }
+
+        // Fallback (ADR-043): reseed the anchor snapshot into one sequence per branch and re-decode
+        // each full suffix. Then register the resident frontier so the *next* level can go
+        // incremental — but only when it ran as a single group (a multi-group reseed clears the
+        // cache between groups, leaving only the last group resident).
         let cellsPerSeq = anchor.count + (pending.map(\.suffix.count).max() ?? 0)
         let budgetCap = max(1, metadata.contextLength / max(1, cellsPerSeq))
         let groupSize = max(1, min(maxSequences, budgetCap))
 
+        invalidateFrontier()
         var cursor = 0
         while cursor < pending.count {
             let end = min(cursor + groupSize, pending.count)
             try decodeBranchGroup(anchor: anchor, group: Array(pending[cursor..<end]), into: &results)
             cursor = end
+        }
+        if pending.count <= groupSize {
+            for (slot, item) in pending.enumerated() { frontier[item.suffix] = slot }
         }
 
         // Leave the resident token bookkeeping at the pristine anchor. Future `ensureAnchor` reuse
@@ -358,6 +396,93 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         // not depend on whatever the last batched group left live in the sequences.
         currentTokens = anchor
         return results
+    }
+
+    /// Incremental beam-frontier expansion (ADR-046). Each pending branch's suffix is one token
+    /// longer than its parent `suffix.dropLast()`; if the parent's KV is resident (root parents use
+    /// `anchorSnapshot`), seed each branch's sequence from its parent — the first child of a parent
+    /// extends the parent's sequence *in place*, additional children fork it via snapshot/restore —
+    /// and decode only the one new token. One `llama_decode` advances the whole frontier. Returns
+    /// `false` without mutating state when the frontier can't satisfy the request (caller reseeds).
+    private func incrementalFrontierBatch(
+        anchor: [TokenID],
+        pending: [(index: Int, suffix: [TokenID])],
+        into results: inout [[TokenLogit]]
+    ) throws -> Bool {
+        guard anchorSnapshot != nil, pending.count <= maxSequences else { return false }
+
+        // Group children by parent, preserving first-seen order; bail if any non-root parent is not
+        // resident (then the reseed fallback handles the whole call).
+        struct Child { var index: Int; var suffix: [TokenID]; var token: TokenID }
+        var groups: [[TokenID]: [Child]] = [:]
+        var parentOrder: [[TokenID]] = []
+        for item in pending {
+            guard let token = item.suffix.last else { return false }
+            let parent = Array(item.suffix.dropLast())
+            if !parent.isEmpty, frontier[parent] == nil { return false }
+            if groups[parent] == nil { groups[parent] = []; parentOrder.append(parent) }
+            groups[parent]!.append(Child(index: item.index, suffix: item.suffix, token: token))
+        }
+
+        // Slots reused in place by a non-root parent's first child are off-limits to forks.
+        var reusedSlots = Set<Int>()
+        for parent in parentOrder where !parent.isEmpty {
+            if let seq = frontier[parent] { reusedSlots.insert(seq) }
+        }
+        var freeSlots = (0..<maxSequences).filter { !reusedSlots.contains($0) }
+
+        // Resolve each child to a (seq, position, token); fork copies are seeded here, before the
+        // single decode, from a snapshot of the parent taken *before* any in-place token is appended.
+        struct Plan { var index: Int; var seq: Int; var position: Int; var token: TokenID; var suffix: [TokenID] }
+        var plans: [Plan] = []
+        plans.reserveCapacity(pending.count)
+        for parent in parentOrder {
+            let children = groups[parent]!
+            let isRoot = parent.isEmpty
+            let parentLen = anchor.count + parent.count
+            var forkSource: [UInt8]?
+            func sourceSnapshot() throws -> [UInt8] {
+                if isRoot { return anchorSnapshot! }
+                if let s = forkSource { return s }
+                let s = try captureSequenceState(seq: llama_seq_id(frontier[parent]!))
+                forkSource = s
+                return s
+            }
+            for (childIndex, child) in children.enumerated() {
+                let seq: Int
+                if childIndex == 0, !isRoot {
+                    seq = frontier[parent]!            // extend in place
+                } else {
+                    guard !freeSlots.isEmpty else { return false }
+                    seq = freeSlots.removeFirst()      // fork: clear the slot, copy the parent in
+                    llama_memory_seq_rm(memory, llama_seq_id(seq), 0, -1)
+                    try restore(try sourceSnapshot(), intoSeq: llama_seq_id(seq))
+                }
+                plans.append(Plan(index: child.index, seq: seq, position: parentLen, token: child.token, suffix: child.suffix))
+            }
+        }
+
+        var batch = llama_batch_init(Int32(plans.count), 0, 1)
+        defer { llama_batch_free(batch) }
+        for (i, plan) in plans.enumerated() {
+            batch.token[i] = llama_token(plan.token)
+            batch.pos[i] = llama_pos(plan.position)
+            batch.n_seq_id[i] = 1
+            batch.seq_id[i]![0] = llama_seq_id(plan.seq)
+            batch.logits[i] = 1
+        }
+        batch.n_tokens = Int32(plans.count)
+        let rc = llama_decode(ctx, batch)
+        if rc != 0 { throw LlamaRuntimeError.decodeFailed(rc) }
+
+        var newFrontier: [[TokenID]: Int] = [:]
+        for (i, plan) in plans.enumerated() {
+            guard let raw = llama_get_logits_ith(ctx, Int32(i)) else { throw LlamaRuntimeError.logitsUnavailable }
+            results[plan.index] = materializeLogits(raw)
+            newFrontier[plan.suffix] = plan.seq
+        }
+        frontier = newFrontier
+        return true
     }
 
     /// Seeds each branch in `group` into its own sequence (a copy of the anchor snapshot), then runs
@@ -398,19 +523,24 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         let rc = llama_decode(ctx, batch)
         if rc != 0 { throw LlamaRuntimeError.decodeFailed(rc) }
 
-        let vocabSize = metadata.vocabularySize
         for (slot, item) in group.enumerated() {
             let idx = lastBatchIndex[slot]
             guard idx >= 0, let raw = llama_get_logits_ith(ctx, Int32(idx)) else {
                 throw LlamaRuntimeError.logitsUnavailable
             }
-            let buffer = UnsafeBufferPointer(start: raw, count: vocabSize)
-            results[item.index] = [TokenLogit](unsafeUninitializedCapacity: vocabSize) { dst, initializedCount in
-                for v in 0..<vocabSize {
-                    dst[v] = TokenLogit(tokenID: TokenID(v), logit: buffer[v])
-                }
-                initializedCount = vocabSize
+            results[item.index] = materializeLogits(raw)
+        }
+    }
+
+    /// Copies a llama logits row (`vocabularySize` floats) into a `[TokenLogit]` vector.
+    private func materializeLogits(_ raw: UnsafePointer<Float>) -> [TokenLogit] {
+        let vocabSize = metadata.vocabularySize
+        let buffer = UnsafeBufferPointer(start: raw, count: vocabSize)
+        return [TokenLogit](unsafeUninitializedCapacity: vocabSize) { dst, initializedCount in
+            for v in 0..<vocabSize {
+                dst[v] = TokenLogit(tokenID: TokenID(v), logit: buffer[v])
             }
+            initializedCount = vocabSize
         }
     }
 
@@ -423,6 +553,10 @@ public actor LlamaModelRuntime: LocalModelRuntime {
             lastPrepareDecodedCount = 0
             return
         }
+
+        // The anchor is changing, so any resident beam frontier (seqs holding `oldAnchor + suffix`)
+        // is stale — drop it before mutating the cache.
+        invalidateFrontier()
 
         if let snapshot = anchorSnapshot,
            anchorTokens.count < anchor.count,
@@ -451,16 +585,21 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         currentTokens = anchorTokens
     }
 
-    private func captureSequenceState() throws -> [UInt8] {
-        let size = llama_state_seq_get_size(ctx, anchorSeq)
+    private func captureSequenceState(seq: llama_seq_id = 0) throws -> [UInt8] {
+        let size = llama_state_seq_get_size(ctx, seq)
         guard size > 0 else { throw LlamaRuntimeError.sequenceStateSnapshotFailed }
         var buffer = [UInt8](repeating: 0, count: size)
         let written = buffer.withUnsafeMutableBufferPointer {
-            llama_state_seq_get_data(ctx, $0.baseAddress, size, anchorSeq)
+            llama_state_seq_get_data(ctx, $0.baseAddress, size, seq)
         }
         guard written > 0 else { throw LlamaRuntimeError.sequenceStateSnapshotFailed }
         return buffer
     }
+
+    /// Drops the incremental-beam frontier (ADR-046). Called by every decode path other than a
+    /// same-anchor `anchoredLogitsBatch`, so a stale resident frontier is never reused after the
+    /// cache has been mutated underneath it.
+    private func invalidateFrontier() { frontier.removeAll(keepingCapacity: true) }
 
     private func restore(_ snapshot: [UInt8]) throws {
         try restore(snapshot, intoSeq: anchorSeq)

@@ -1867,3 +1867,55 @@ text. Both are now closed:
   3. **Warm the first keystroke.** Pre-decode/seed the cache at session start (or on focus) so the
      first real completion isn't a cold ~22 ms clear+decode. Cheap, one-time, no quality impact.
   4. LM head (~4%) and capture (~0.5%) are **not** worth optimizing — both were dead ends.
+
+## ADR-046: Incremental beam decoding — keep branches resident, decode one new token per level
+
+- Date: 2026-05-31
+- Status: accepted (implemented, default on)
+- Context: ADR-045's lever #2 — the 3 batched frontier levels are the dominant steady-state cost
+  (~33 ms / 58%), and `decodeBranchGroup` (ADR-043) wastes work by **reseeding the anchor and
+  re-decoding each branch's entire suffix every level** (~12 redundant token-forwards + ~11 anchor
+  re-restores per depth-4 width-4 completion).
+- Decision: make `anchoredLogitsBatch` keep an **incremental beam frontier** in `LlamaModelRuntime`.
+  When consecutive calls form a beam (each level's suffixes are one-token extensions of the previous
+  level's), every live branch's KV stays resident in its own sequence and only the **new token** is
+  decoded per level:
+  - A map `frontier: [suffix → seq id]` records which sequence holds `anchor + suffix`. The empty
+    (root) suffix is implicit — its state is `anchorSnapshot`.
+  - For each pending branch, the parent is `suffix.dropLast()`. The **first** child of a parent
+    **extends that parent's sequence in place** (no restore, no re-decode — just one token at
+    `parentLen`); **additional** children (a fork/split) restore a snapshot of the parent into a free
+    sequence (`seq_rm` + `set_data`) taken *before* any in-place token is appended, so copies are
+    clean. Root children all fork from `anchorSnapshot` (seq 0 is never assumed to still hold the
+    anchor, so the cross-keystroke append invariant is preserved). One `llama_decode` advances the
+    whole frontier.
+  - Slot accounting is exact: ≤ `branchWidth` ≤ `n_seq_max` live branches, in-place children reuse
+    their parent's slot, forks take freed (non-surviving-parent or unused) slots — so a slot is never
+    overcommitted.
+  - **Fallback never removed:** any call whose parents aren't resident (the first level, an
+    interleaved single-branch `anchoredLogits`, or a non-beam call pattern) drops to the proven
+    ADR-043 reseed path, which then *registers* the resulting frontier so the next level can resume
+    incrementally. Every non-beam decode path (`prepare`, single `anchoredLogits`, `resetKVCache`,
+    anchor change/append, a root suffix) calls `invalidateFrontier()`, so a stale frontier is never
+    reused after the cache is mutated underneath it. Gated by `enableIncrementalBeam` (default on).
+- Quality (the hard part): incremental decodes a branch's tokens as **separate single-token
+  recurrent updates across levels**, whereas reseed/full-decode process the suffix as **one chunk**.
+  On this hybrid Gated-Delta-Net model the chunked-GDN math for chunk-size-1 is not bit-identical to
+  chunk-size-N, so incremental is *not* bit-equal to reseed for non-root branches (root forks **are**
+  bit-equal — identical batch). Measured drift on an adversarial 3-level frontier (`testIncremental…`
+  diagnostic): `|incremental − full-decode| ≤ 0.074`, essentially **the same** as
+  `|reseed − full-decode| ≤ 0.096`, and `|incremental − reseed| ≤ 0.036` — all inside the documented
+  ADR-012/018/043 ≤~0.12 split-recurrent envelope. So incremental adds **no drift beyond what the
+  shipped batched path already incurs**. (Lesson: a strict top-k-*set* assertion is too brittle for
+  this envelope — adversarial near-ties reorder/re-set ranks 3+ and can flip a tied argmax for *both*
+  reseed and incremental vs a sequential decode; the gate is now a quantitative max-|Δlogit| bound
+  plus argmax-stability only for well-separated branches.)
+- Gates: `AnchoredLogitsCorrectnessTests.testIncrementalFrontierWithinEnvelope` (root forks +
+  in-place extend + mid-beam split, `|inc−truth| ≤ 0.12`, `|inc−reseed| ≤ 0.06`, well-separated
+  argmax preserved) and `ConstrainedGenerationIntegrationTests.testIncrementalBeamPreservesTopCompletion`
+  (the **displayed top completion is identical** with incremental on vs off across 5 realistic
+  prose/code prompts). Full ModelRuntime + ConstrainedGeneration suites green in release.
+- Result (`testIncrementalWarmSpeedup`, warm/append path, release): reseed mean **46.1 ms** → incremental
+  mean **35.2 ms** (best 33 → 26 ms) — **1.31× / ~11 ms saved per keystroke**, no quality change.
+  Combined with ADR-043's cold-start win, this is the second compounding cut to the per-keystroke
+  steady-state cost.
