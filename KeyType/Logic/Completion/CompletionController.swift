@@ -635,11 +635,69 @@ final class CompletionController {
     /// previous caret can't re-show the stale suggestion.
     func dismissStaleCompletion(typedCharacters typed: String?) {
         guard let shown = visibleCandidate?.text, !shown.isEmpty else { return }
-        if let typed, !typed.isEmpty, shown.hasPrefix(typed) { return }
+        if let typed, !typed.isEmpty, shown.hasPrefix(typed) {
+            if advanceTypeThrough(typedCharacters: typed) { return }
+        }
         debounceTask?.cancel()
         generationTask?.cancel()
         warmupTask?.cancel()
         clearCompletion()
+    }
+
+    /// The user typed the next visible ghost characters. AX will eventually report the real field
+    /// state, but until then acceptance must see the optimistic caret so a rapid Tab does not insert
+    /// characters the user already typed. This only mutates local UI/acceptance state; it deliberately
+    /// leaves debounce/generation tasks alone so inference and KV/prefill reuse follow the normal AX
+    /// snapshot path.
+    private func advanceTypeThrough(typedCharacters typed: String) -> Bool {
+        guard let live = latestContext ?? anchorContext,
+              let anchorText,
+              let anchorContext,
+              let advanced = Self.typeThroughAdvance(
+                  anchorText: anchorText,
+                  anchorContext: anchorContext,
+                  liveContext: live,
+                  typedCharacters: typed
+              ) else {
+            return false
+        }
+
+        latestContext = advanced.context
+        if advanced.remainingText.isEmpty {
+            clearCompletion()
+        } else {
+            let remainder = CompletionCandidate(text: advanced.remainingText, mode: .prose)
+            visibleCandidate = remainder
+            presenter.advanceAfterAccepting(head: typed, remainder: remainder)
+        }
+        return true
+    }
+
+    nonisolated static func typeThroughAdvance(
+        anchorText: String,
+        anchorContext: TextFieldContext,
+        liveContext: TextFieldContext,
+        typedCharacters typed: String
+    ) -> (context: TextFieldContext, remainingText: String)? {
+        guard !typed.isEmpty,
+              let current = SuggestionAnchor.remaining(
+                  anchorText: anchorText,
+                  anchor: anchorContext,
+                  live: liveContext
+              ),
+              current.hasPrefix(typed) else {
+            return nil
+        }
+
+        let optimistic = liveContext.replacingBeforeCursor(liveContext.beforeCursor + typed)
+        guard let remaining = SuggestionAnchor.remaining(
+            anchorText: anchorText,
+            anchor: anchorContext,
+            live: optimistic
+        ) else {
+            return nil
+        }
+        return (optimistic, remaining)
     }
 
     /// Tab: insert the next word of the suggestion and keep the *rest* of the same completion in place

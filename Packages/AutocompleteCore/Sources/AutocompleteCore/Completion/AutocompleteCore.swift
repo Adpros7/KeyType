@@ -189,6 +189,10 @@ public enum SuppressionReason: Equatable {
     case maxCompletionLengthExceeded
     case insertionUnsafe
     case currentWordLooksLikeTypo
+    /// The completion leaves the word the user is typing *open* on a stem that cannot begin any word
+    /// in the dictionary (e.g. a lone `"x"` after `"th"`) — so it could never resolve to a real word.
+    /// Distinct from `currentWordLooksLikeTypo`, which only judges a word that has already *closed*.
+    case currentWordHasNoValidCompletion
     /// A mid-line / fill-in-the-middle completion that merely reproduces text already present after
     /// the caret — accepting it would duplicate the existing suffix. See `SuffixOverlapGuard`.
     case duplicatesAfterCursor

@@ -125,6 +125,12 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
                         if await typoGuard.shouldDrop(parentText: branch.text, childText: child.text) {
                             continue
                         }
+                        // Drop branches that splice a garbage symbol into the open word or pile up
+                        // punctuation ("gre" → "at$", "...."); a clean branch can then win the beam
+                        // instead of the controller suppressing the corrupted best candidate (ADR-052).
+                        if MidWordCharsetGuard.violates(completion: child.text, request: request) {
+                            continue
+                        }
                         switch profile.stopBehavior(for: id) {
                         case .stopAndDisplay:
                             // The sentence-end flag is context-free; only stop on a *real*

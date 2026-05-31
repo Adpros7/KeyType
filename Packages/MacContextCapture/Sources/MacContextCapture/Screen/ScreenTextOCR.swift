@@ -13,13 +13,17 @@ import Vision
 
 public enum ScreenTextOCR {
     /// Recognise text in `image`, returning the recognised lines in natural reading order
-    /// (top-to-bottom, then left-to-right). Uses `.fast` recognition with language correction off
-    /// for latency — this feeds an LLM prompt, not a transcription, so perfect accuracy isn't needed.
+    /// (top-to-bottom, then left-to-right). Uses `.accurate` recognition with language correction
+    /// **on**: this capture runs out of band (on focus/window change plus a slow timer, never on the
+    /// per-keystroke path — see `WindowOCRCaptureEngine`/`ScreenContextController`), so there is no
+    /// keystroke-latency budget to protect and accuracy is what matters. Garbled recognitions are the
+    /// single largest source of polluted screen context (the model parrots "Ilne wilh real 5ulfix"
+    /// gibberish), and `.accurate` + language correction cuts them at the source rather than relying
+    /// solely on the post-hoc corruption filters below. (See ADR-049/052.)
     ///
-    /// `minimumConfidence` is the primary guard against *corrupted* OCR reaching the prompt: Vision
-    /// reports a per-candidate confidence, and a low value is the signal of a mangled recognition
-    /// (the kind that produces "Ilne wilh real 5ulfix" gibberish the model then parrots). Feeding
-    /// nothing is better than feeding garbage, so low-confidence lines are dropped here. (See ADR-049.)
+    /// `minimumConfidence` is the first guard against *corrupted* OCR reaching the prompt: Vision
+    /// reports a per-candidate confidence, and a low value is the signal of a mangled recognition.
+    /// Feeding nothing is better than feeding garbage, so low-confidence lines are dropped here.
     public static func recognizeLines(in image: CGImage, minimumConfidence: Float = 0.4) async throws -> [String] {
         try await withCheckedThrowingContinuation { continuation in
             let request = VNRecognizeTextRequest { request, error in
@@ -43,8 +47,8 @@ public enum ScreenTextOCR {
                 }
                 continuation.resume(returning: lines)
             }
-            request.recognitionLevel = .fast
-            request.usesLanguageCorrection = false
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
 
             let handler = VNImageRequestHandler(cgImage: image, options: [:])
             do {

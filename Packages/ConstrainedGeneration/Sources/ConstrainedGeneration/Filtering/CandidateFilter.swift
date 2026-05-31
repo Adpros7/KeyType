@@ -11,6 +11,17 @@ import Foundation
 /// (unknown language / no dictionary / proper nouns) so the net never suppresses a real word.
 public protocol SynchronousWordRecognizing {
     func recognizes(_ word: String, language: String?) -> Bool
+
+    /// `false` only when `prefix` cannot begin **any** word in the dictionary for `language` — used
+    /// to drop a mid-word completion left open on a dead-end stem (`"th"` → `"x"` → `"thx"`). MUST be
+    /// conservative: return `true` whenever unsure (no dictionary, unknown language, empty prefix, off
+    /// the main thread) so a legitimate in-progress word is never suppressed. A default returns `true`
+    /// so existing recognisers keep the gate inert until they opt in.
+    func canCompleteWord(prefix: String, language: String?) -> Bool
+}
+
+public extension SynchronousWordRecognizing {
+    func canCompleteWord(prefix: String, language: String?) -> Bool { true }
 }
 
 /// Output filter for the full `SuppressionReason` taxonomy (see `docs/01-architecture.md` — the
