@@ -2141,3 +2141,33 @@ text. Both are now closed:
   `/docs`). Updates are only as trustworthy as the EdDSA private key, so it must be backed up and
   kept off the repo. Bumping `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` before a release is
   required; the script warns when metadata is unchanged since the last tag.
+
+## ADR-052 — A failed profile build must not leave a usable artifact
+
+- Date: 2026-06-01
+- Status: accepted
+- Context: A user reported (issue #1) that switching the active model to a Gemma GGUF surfaced
+  "The operation couldn't be completed. (ProfileBuilderCore.ACPFCLIError error 1.)", and that
+  clicking "Prepare" again and restarting appeared to fix it. Three problems combined here:
+  (1) `ACPFCLIError` was only `CustomStringConvertible`, so the app's `error.localizedDescription`
+  rendered the generic Foundation bridge string ("…error 1.") instead of the readable per-check
+  detail — "error 1" is just the source-order index of `.selfCheckFailed`. (2) The catalog "Prepare"
+  path (`ModelSetupCoordinator.startProfileGeneration`) used `localizedDescription` while the import
+  path used a `message(for:)` helper that prefers the typed error's description — an inconsistency.
+  (3) `BuildProfile.run` writes the profile **before** its post-write self-check, so a self-check
+  failure left the written file on disk, and `ProfileGenerator.generateProfileIfNeeded` skips
+  building whenever the output already exists — so the retry trusted the file that had just failed
+  validation rather than rebuilding it, masking the failure (the actual fault was never reproduced
+  and is most likely transient resource contention while a second `LlamaModelRuntime` is brought up).
+- Decision: (1) `ACPFCLIError` now also conforms to `LocalizedError` (`errorDescription = description`)
+  so the readable text surfaces through any `localizedDescription`. (2) `startProfileGeneration` uses
+  the same `message(for:)` helper as the import path and logs that message. (3) `generateProfileIfNeeded`
+  builds into a sibling temp file and only moves it into place after `BuildProfile.run` (including the
+  self-check) succeeds, deleting the temp on failure; and before honoring the "already present" skip it
+  validates the existing profile by opening it against the live tokenizer (the same check the runtime
+  applies at load time), rebuilding if that validation fails.
+- Consequences: Profile-build failures now show which self-check failed instead of an opaque error
+  code, and a failed or interrupted build can no longer be silently "fixed" by reusing a bad file —
+  a retry rebuilds. The validate-on-skip path adds one O(vocab) tokenizer-digest pass when a profile
+  already exists, but only on the setup/import path (never the completion hot path), so the cost is
+  negligible. Behaviour is unchanged on the success path.
