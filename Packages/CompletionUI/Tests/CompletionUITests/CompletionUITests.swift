@@ -219,6 +219,70 @@ final class CompletionUITests: XCTestCase {
         XCTAssertLessThan(layout.frame.height, 40)
     }
 
+    // MARK: - Capsule layout
+
+    @MainActor
+    func testCapsuleLayoutCentersBelowCaret() {
+        let font = NSFont.systemFont(ofSize: 14)
+        let caret = CGRect(x: 200, y: 100, width: 2, height: 18)
+        let placement = OverlayPlacement(
+            cursorRect: caret,
+            fieldRect: CGRect(x: 0, y: 80, width: 600, height: 40),
+            presentation: .capsule
+        )
+        let layout = GhostTextOverlayWindow.layout(for: " world", font: font, placement: placement)
+
+        // Horizontally centered on the caret.
+        XCTAssertEqual(layout.frame.midX, caret.midX, accuracy: 0.5)
+        // Positioned strictly below the caret (AppKit bottom-left origin → smaller Y).
+        XCTAssertLessThanOrEqual(layout.frame.maxY, caret.minY)
+    }
+
+    @MainActor
+    func testCapsulePinsToTrailingEdgeNearTrailingEdge() {
+        let font = NSFont.systemFont(ofSize: 14)
+        let field = CGRect(x: 0, y: 80, width: 300, height: 40)
+        let placement = OverlayPlacement(
+            cursorRect: CGRect(x: 298, y: 100, width: 2, height: 18),
+            fieldRect: field,
+            presentation: .capsule
+        )
+        let layout = GhostTextOverlayWindow.layout(for: " continuation", font: font, placement: placement)
+
+        XCTAssertEqual(layout.frame.maxX, field.maxX, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(layout.frame.minX, field.minX)
+    }
+
+    @MainActor
+    func testCapsulePinsToLeadingEdgeNearLeadingEdge() {
+        let font = NSFont.systemFont(ofSize: 14)
+        let field = CGRect(x: 20, y: 80, width: 300, height: 40)
+        let placement = OverlayPlacement(
+            cursorRect: CGRect(x: 22, y: 100, width: 2, height: 18),
+            fieldRect: field,
+            presentation: .capsule
+        )
+        let layout = GhostTextOverlayWindow.layout(for: " continuation", font: font, placement: placement)
+
+        XCTAssertEqual(layout.frame.minX, field.minX, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(layout.frame.maxX, field.maxX)
+    }
+
+    @MainActor
+    func testCapsulePinsToLeadingEdgeWhenWiderThanField() {
+        let font = NSFont.systemFont(ofSize: 14)
+        let field = CGRect(x: 20, y: 80, width: 40, height: 40)
+        let placement = OverlayPlacement(
+            cursorRect: CGRect(x: 40, y: 100, width: 2, height: 18),
+            fieldRect: field,
+            presentation: .capsule
+        )
+        let layout = GhostTextOverlayWindow.layout(for: " a very long continuation indeed", font: font, placement: placement)
+
+        XCTAssertGreaterThan(layout.frame.width, field.width)
+        XCTAssertEqual(layout.frame.minX, field.minX, accuracy: 0.5)
+    }
+
     // MARK: - Font resolution
 
     @MainActor

@@ -401,11 +401,18 @@ final class CompletionController {
         clearOnFailure: Bool = true
     ) -> Bool {
         guard let shown = liveCompletion(for: live), !shown.isEmpty,
-              let placement = placementResolver.placement(for: live) else {
+              var placement = placementResolver.placement(for: live) else {
             if clearOnFailure {
                 clearCompletion()
             }
             return false
+        }
+        // Mid-line fill-in-the-middle completions overlap the existing suffix when drawn as inline
+        // ghost text, so present them in a capsule below the caret instead. End-of-line and
+        // end-of-paragraph (suffix begins on the next line) completions append cleanly, so they keep
+        // the inline ghost-text form.
+        if placement.mode == .inline, Self.shouldUseCapsule(for: live) {
+            placement.presentation = .capsule
         }
         let candidate = CompletionCandidate(text: shown, mode: .prose)
         visibleCandidate = candidate
@@ -440,6 +447,17 @@ final class CompletionController {
         lastContextKey = nil
         lastCaretRect = nil
         clearCompletion()
+    }
+
+    /// Whether the completion should render as a capsule below the caret rather than inline ghost
+    /// text. True only when there is visible (non-whitespace) suffix text remaining on the *current*
+    /// line — that's the case where inline ghost text would overlap the user's existing text. If the
+    /// caret is at the end of the line, the document, or the end of a paragraph (the remainder of the
+    /// line is empty/whitespace and the next character is a newline), inline ghost text appends
+    /// cleanly with nothing to overlap, so we keep it.
+    static func shouldUseCapsule(for context: TextFieldContext) -> Bool {
+        let currentLineSuffix = context.afterCursor.prefix { !$0.isNewline }
+        return currentLineSuffix.contains { !$0.isWhitespace }
     }
 
     /// Whether the caret has shifted enough to warrant re-pinning the overlay. A small epsilon

@@ -15,15 +15,37 @@ final class NextWordSplitterTests: XCTestCase {
     }
 
     func testMidWordCompletionWithoutLeadingSpace() {
+        // The word's trailing space stays with the rest so it leads the next word.
         let (head, rest) = NextWordSplitter.split("orrow to talk")
-        XCTAssertEqual(head, "orrow ")
-        XCTAssertEqual(rest, "to talk")
+        XCTAssertEqual(head, "orrow")
+        XCTAssertEqual(rest, " to talk")
     }
 
     func testLeadingWhitespaceTravelsWithFirstWord() {
+        // Leading whitespace travels with the word it precedes; trailing whitespace does not.
         let (head, rest) = NextWordSplitter.split(" world today")
-        XCTAssertEqual(head, " world ")
-        XCTAssertEqual(rest, "today")
+        XCTAssertEqual(head, " world")
+        XCTAssertEqual(rest, " today")
+    }
+
+    func testSpaceLeadsEachWordNotTrails() {
+        // "word word word." → ["word", " word", " word", "."].
+        XCTAssertEqual(walk("word word word."), ["word", " word", " word", "."])
+        // " word word word." → [" word", " word", " word", "."].
+        XCTAssertEqual(walk(" word word word."), [" word", " word", " word", "."])
+    }
+
+    /// Repeatedly splits `text`, collecting each accepted head until the suggestion is exhausted.
+    private func walk(_ text: String) -> [String] {
+        var remaining = text
+        var heads: [String] = []
+        while !remaining.isEmpty {
+            let (head, rest) = NextWordSplitter.split(remaining)
+            XCTAssertFalse(head.isEmpty, "split must always make progress")
+            heads.append(head)
+            remaining = rest
+        }
+        return heads
     }
 
     func testRepeatedSplitWalksTheSuggestion() {
@@ -58,15 +80,15 @@ final class NextWordSplitterTests: XCTestCase {
         XCTAssertEqual(rest, "")
     }
 
-    func testCommaSplitsFromWordAndKeepsTrailingSpace() {
-        // "world, today" → "world", then ", " (comma + separator), then "today".
+    func testCommaSplitsFromWordAndSpaceLeadsNextWord() {
+        // "world, today" → "world", then "," (the comma alone), then " today" (space leads the word).
         let (firstHead, afterWord) = NextWordSplitter.split("world, today")
         XCTAssertEqual(firstHead, "world")
         XCTAssertEqual(afterWord, ", today")
 
         let (punctHead, afterPunct) = NextWordSplitter.split(afterWord)
-        XCTAssertEqual(punctHead, ", ")
-        XCTAssertEqual(afterPunct, "today")
+        XCTAssertEqual(punctHead, ",")
+        XCTAssertEqual(afterPunct, " today")
     }
 
     func testRunOfPunctuationIsOneUnit() {
@@ -79,11 +101,11 @@ final class NextWordSplitterTests: XCTestCase {
         XCTAssertEqual(after, "")
     }
 
-    func testWordSplitUnaffectedWhenNoPunctuation() {
-        // Regression: a plain trailing space must still travel with the word (no behaviour change).
+    func testWordSplitLeavesSeparatorWithNextWord() {
+        // The separator after the first word leads the next word rather than trailing this one.
         let (head, rest) = NextWordSplitter.split("hello there friend")
-        XCTAssertEqual(head, "hello ")
-        XCTAssertEqual(rest, "there friend")
+        XCTAssertEqual(head, "hello")
+        XCTAssertEqual(rest, " there friend")
     }
 
     func testWalkingASentenceWithPunctuationReconstructsIt() {

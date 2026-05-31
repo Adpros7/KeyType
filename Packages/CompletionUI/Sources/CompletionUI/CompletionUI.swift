@@ -13,10 +13,20 @@ public enum OverlayMode: Equatable {
     case smartInsertWarning
 }
 
+/// How the completion is drawn near the caret. `inlineGhost` is the default dimmed continuation that
+/// sits on the typing line. `capsule` is a self-contained rounded pill rendered *below* the caret —
+/// used for mid-line (fill-in-the-middle) completions so the suggestion doesn't overlap the existing
+/// suffix text on the same line. See ADR-016 / the mid-line capsule decision.
+public enum OverlayPresentation: Equatable {
+    case inlineGhost
+    case capsule
+}
+
 public struct OverlayPlacement: Equatable {
     public var cursorRect: CGRect
     public var fieldRect: CGRect?
     public var mode: OverlayMode
+    public var presentation: OverlayPresentation
     public var isRightToLeft: Bool
     public var verticalOffset: Double
     public var fontSizeAdjustmentFactor: Double
@@ -25,6 +35,7 @@ public struct OverlayPlacement: Equatable {
         cursorRect: CGRect,
         fieldRect: CGRect? = nil,
         mode: OverlayMode = .inline,
+        presentation: OverlayPresentation = .inlineGhost,
         isRightToLeft: Bool = false,
         verticalOffset: Double = 0,
         fontSizeAdjustmentFactor: Double = 1
@@ -32,6 +43,7 @@ public struct OverlayPlacement: Equatable {
         self.cursorRect = cursorRect
         self.fieldRect = fieldRect
         self.mode = mode
+        self.presentation = presentation
         self.isRightToLeft = isRightToLeft
         self.verticalOffset = verticalOffset
         self.fontSizeAdjustmentFactor = fontSizeAdjustmentFactor
@@ -216,5 +228,50 @@ public struct GhostTextView: View {
 
     private static func relativeLuminance(_ color: NSColor) -> CGFloat {
         0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
+    }
+}
+
+/// Capsule completion view: the completion rendered as opaque, fully-readable text inside a rounded
+/// pill. Unlike `GhostTextView` this is a self-contained surface (its own background + border) drawn
+/// *below* the caret, so it never overlaps the existing suffix text on the typing line. It therefore
+/// uses system label/surface colors rather than the (dimmed) field foreground color, since it isn't
+/// meant to blend into the field's own text.
+public struct CapsuleCompletionView: View {
+    public var text: String
+    public var font: NSFont
+    public var horizontalPadding: CGFloat
+    public var verticalPadding: CGFloat
+
+    public init(
+        text: String,
+        font: NSFont = .systemFont(ofSize: NSFont.systemFontSize),
+        horizontalPadding: CGFloat = CapsuleCompletionView.defaultHorizontalPadding,
+        verticalPadding: CGFloat = CapsuleCompletionView.defaultVerticalPadding
+    ) {
+        self.text = text
+        self.font = font
+        self.horizontalPadding = horizontalPadding
+        self.verticalPadding = verticalPadding
+    }
+
+    public static let defaultHorizontalPadding: CGFloat = 10
+    public static let defaultVerticalPadding: CGFloat = 4
+
+    public var body: some View {
+        ZStack {
+            Capsule(style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+                )
+            Text(text)
+                .font(Font(font as CTFont))
+                .foregroundStyle(Color(nsColor: .labelColor))
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, horizontalPadding)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

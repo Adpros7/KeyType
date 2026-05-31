@@ -16,7 +16,12 @@ import SwiftUI
 @MainActor
 public final class GhostTextOverlayWindow {
     private lazy var window: NSPanel = makeWindow()
-    private let hosting = NSHostingView(rootView: GhostTextView(text: ""))
+    private let hosting = NSHostingView(rootView: AnyView(EmptyView()))
+
+    /// Capsule geometry: padding inside the pill and the gap between the caret and the pill's top.
+    static let capsuleHorizontalPadding = CapsuleCompletionView.defaultHorizontalPadding
+    static let capsuleVerticalPadding = CapsuleCompletionView.defaultVerticalPadding
+    static let capsuleGapBelowCaret: CGFloat = 5
 
     public nonisolated init() {}
 
@@ -30,12 +35,31 @@ public final class GhostTextOverlayWindow {
         guard !text.isEmpty else { hide(); return }
 
         let layout = Self.layout(for: text, font: font, placement: placement)
-        hosting.rootView = GhostTextView(
-            lines: layout.lines,
-            font: font,
-            isRightToLeft: placement.isRightToLeft,
-            textColor: textColor
-        )
+        switch placement.presentation {
+        case .capsule:
+            // The capsule is a self-contained popover surface, so give it a drop shadow to lift it
+            // off whatever text it sits below; ghost text deliberately has none (it should read as
+            // part of the field).
+            window.hasShadow = true
+            hosting.rootView = AnyView(
+                CapsuleCompletionView(
+                    text: text,
+                    font: font,
+                    horizontalPadding: Self.capsuleHorizontalPadding,
+                    verticalPadding: Self.capsuleVerticalPadding
+                )
+            )
+        case .inlineGhost:
+            window.hasShadow = false
+            hosting.rootView = AnyView(
+                GhostTextView(
+                    lines: layout.lines,
+                    font: font,
+                    isRightToLeft: placement.isRightToLeft,
+                    textColor: textColor
+                )
+            )
+        }
 
         window.setFrame(
             layout.frame.offsetBy(dx: 0, dy: -CGFloat(placement.verticalOffset)),
@@ -117,6 +141,9 @@ public final class GhostTextOverlayWindow {
     }
 
     static func layout(for text: String, font: NSFont, placement: OverlayPlacement) -> Layout {
+        if placement.presentation == .capsule {
+            return capsuleLayout(for: text, font: font, placement: placement)
+        }
         let caret = placement.cursorRect
         let fontLineHeight = ceil(font.ascender - font.descender)
         let lineHeight = max(Self.trustedCaretHeight(for: placement, fallbackLineHeight: fontLineHeight), fontLineHeight)
@@ -163,6 +190,36 @@ public final class GhostTextOverlayWindow {
         return Layout(
             frame: CGRect(x: field.minX, y: y, width: fullLineWidth, height: height),
             lines: lines
+        )
+    }
+
+    /// Layout for the mid-line capsule: a rounded pill placed directly *below* the caret. It is
+    /// horizontally centered on the caret, then clamped inside the field so that a caret near the
+    /// trailing edge pins the pill to the trailing edge (and likewise for the leading edge). When the
+    /// pill is wider than the field it is pinned to the leading edge. Coordinates are AppKit
+    /// (bottom-left origin), so "below" the caret means a smaller Y.
+    static func capsuleLayout(for text: String, font: NSFont, placement: OverlayPlacement) -> Layout {
+        let caret = placement.cursorRect
+        let fontLineHeight = ceil(font.ascender - font.descender)
+        let lineHeight = max(trustedCaretHeight(for: placement, fallbackLineHeight: fontLineHeight), fontLineHeight)
+        let textWidth = ceil(measuredWidth(text, font: font)) + 2
+        let capsuleWidth = textWidth + capsuleHorizontalPadding * 2
+        let capsuleHeight = lineHeight + capsuleVerticalPadding * 2
+
+        var x = caret.midX - capsuleWidth / 2
+        if let field = placement.fieldRect, !field.isEmpty {
+            if capsuleWidth >= field.width {
+                x = field.minX
+            } else {
+                x = min(max(x, field.minX), field.maxX - capsuleWidth)
+            }
+        }
+
+        let y = caret.minY - capsuleGapBelowCaret - capsuleHeight
+
+        return Layout(
+            frame: CGRect(x: x, y: y, width: capsuleWidth, height: capsuleHeight),
+            lines: [GhostTextLine(text: text, reservedHeight: capsuleHeight)]
         )
     }
 

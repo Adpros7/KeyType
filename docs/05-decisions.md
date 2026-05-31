@@ -1919,3 +1919,69 @@ text. Both are now closed:
   mean **35.2 ms** (best 33 → 26 ms) — **1.31× / ~11 ms saved per keystroke**, no quality change.
   Combined with ADR-043's cold-start win, this is the second compounding cut to the per-keystroke
   steady-state cost.
+
+## ADR-047 — Group source files by responsibility inside existing targets
+
+- Date: 2026-05-31
+- Status: accepted
+- Context: Several app and SwiftPM target directories had grown into flat folders with many
+  unrelated implementation files, making Xcode navigation and ownership boundaries harder to scan.
+- Decision: Keep the existing module graph unchanged, but organize files into responsibility-based
+  subdirectories inside each target. The app target now groups completion, context, settings,
+  permissions, models, telemetry, controls, and settings-section views. SwiftPM targets now group
+  dense source/test folders by local concern, such as context-capture accessibility/caret/screen/
+  text-analysis, token-profile format/storage/classification/validation, generation engine/
+  filtering/sampling/text, and model-management catalog/download/validation. The app target's
+  `.pbxproj` groups mirror the physical layout; SwiftPM targets rely on recursive source discovery
+  under `Sources/<Target>` and `Tests/<Target>`.
+- Consequences: Future files should land in the nearest responsibility folder before creating a
+  new package or widening a root target directory. This is a source organization change only; it
+  does not alter module boundaries or public APIs.
+
+## ADR-048 — Mid-line (FIM) completions render in a capsule below the caret
+
+- Date: 2026-05-31
+- Status: accepted
+- Context: Inline ghost text is drawn starting at the caret's right edge and extending rightward.
+  For end-of-line completions this reads naturally, but for **mid-line** (fill-in-the-middle)
+  completions the ghost text is painted directly **on top of** the field's existing suffix text on
+  the same line, producing an unreadable overlap (the user's "…center of my presentation…" with the
+  suggestion smeared over it).
+- Decision: When the live completion has visible (non-whitespace) suffix remaining on the *current*
+  line, present it as a self-contained rounded **capsule below the caret** instead of inline ghost
+  text. The capsule is horizontally centered on the caret and then clamped inside the field rect, so
+  a caret near the trailing edge pins the capsule to the trailing edge (and likewise the leading
+  edge); a capsule wider than the field pins to the leading edge. It sits a few points below the
+  caret with its own surface (`controlBackgroundColor` fill, subtle border, window drop shadow) and
+  uses opaque system label text rather than the dimmed field color, since it is a distinct popover
+  surface rather than a continuation of the field's own text.
+  - End-of-line, end-of-document, and **end-of-paragraph** completions (the remainder of the current
+    line is empty/whitespace and the next character is a newline) keep the existing inline ghost-text
+    form — there is no same-line suffix to overlap.
+  - Implemented as `OverlayPresentation` (`inlineGhost` / `capsule`) on `OverlayPlacement`, a
+    `CapsuleCompletionView`, and a `GhostTextOverlayWindow.capsuleLayout`. The presentation is chosen
+    in `CompletionController.renderSuggestion` via `shouldUseCapsule(for:)`, only for `.inline`
+    placement mode (text-mirror apps already render above the line). FIM generation is unchanged.
+- Consequences: Mid-line suggestions are always legible regardless of the suffix behind them. The
+  capsule decision is driven by the *live* after-cursor text, so a suggestion can switch between
+  inline and capsule forms as the caret moves to/from the end of a line. Tab/Shift+Tab acceptance and
+  the live shrink-as-you-type anchor are unaffected (only the presentation layer changed).
+
+## ADR-049 — The separator leads the next word, not the previous one
+
+- Date: 2026-05-31
+- Status: accepted (refines ADR-038, which had the head *trail* through the word's whitespace)
+- Context: `NextWordSplitter` (Tab word-by-word, ADR-016/038) bundled a word's **trailing** whitespace
+  into the same accept unit, so `" word word word."` split into `[" word ", "word ", "word", "."]`.
+  The desired segmentation puts the space **before** the word it separates: `[" word", " word",
+  " word", "."]`, and `"word word word."` → `["word", " word", " word", "."]`. The leading separator
+  belongs to the upcoming word, not the one just accepted.
+- Decision: The word head now stops at the ICU word's `upperBound` (leading whitespace still travels
+  with the word, trailing whitespace does not), and the leading-punctuation unit no longer swallows
+  the whitespace after the punctuation run. In both cases the trailing whitespace stays in `rest` so
+  it leads the next unit. The separable-punctuation set and run-as-one-unit behaviour from ADR-038 are
+  unchanged.
+- Consequences: `"world, today"` now walks as `["world", ",", " today"]` (the comma alone, then the
+  space-led word) rather than `["world", ", ", "today"]`. Insertion is unchanged in aggregate — the
+  walk still reconstructs the full string and `acceptNextWord` loops `split` over the shrinking
+  remainder via the anchor — only the boundary at which the separator is inserted moved by one unit.

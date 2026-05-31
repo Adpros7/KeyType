@@ -4,15 +4,16 @@ import Foundation
 /// word boundaries so it works across scripts — space-delimited (Latin/Cyrillic/…) *and*
 /// space-less ones the system segments (CJK, Thai). See ADR-016.
 ///
-/// "Next word" is everything from the start of the string up to the next accept boundary, so leading
-/// whitespace and the word's own trailing whitespace travel with it (accepting `" world today"`
-/// inserts `" world "` and leaves `"today"`; accepting `"orrow to talk"` inserts `"orrow "` and
-/// leaves `"to talk"`). A string with one or zero words accepts wholesale.
+/// "Next word" is the leading whitespace plus the word itself, up to (but not including) the word's
+/// trailing whitespace. The separator before a word travels *with* that word, never after the
+/// previous one (accepting `" world today"` inserts `" world"` and leaves `" today"`; accepting
+/// `"orrow to talk"` inserts `"orrow"` and leaves `" to talk"`). A string with one or zero words
+/// accepts wholesale.
 ///
 /// Sentence/clause punctuation (`. , ; : ! ?` and the common full-width CJK forms) is *not* swallowed
 /// with the word it follows — it becomes its own accept unit, so completing `"esses."` inserts
 /// `"esses"` on the first Tab and `"."` on the next. A run of such punctuation (e.g. `"?!"`, `"…"`,
-/// `", "`) is one unit, and any whitespace after it travels with it. See ADR-038.
+/// `","`) is one unit; any whitespace after it stays with whatever comes next. See ADR-038.
 public enum NextWordSplitter {
     /// Punctuation that is confirmed as a separate Tab press rather than bundled into the preceding
     /// word. Covers ASCII sentence/clause marks plus their full-width CJK counterparts.
@@ -27,15 +28,12 @@ public enum NextWordSplitter {
 
         // Leading-punctuation unit: when the remainder begins (after any whitespace) with separable
         // punctuation — e.g. the `"."` left over once `"esses"` was accepted, or `", today"` — that
-        // punctuation run plus the whitespace trailing it is the whole unit, kept apart from the next
-        // word.
+        // punctuation run is the whole unit. The whitespace that follows it leads the next word, so it
+        // is *not* swallowed here.
         if let firstNonSpace = text.firstIndex(where: { !$0.isWhitespace }),
            separablePunctuation.contains(text[firstNonSpace]) {
             var index = firstNonSpace
             while index < text.endIndex, separablePunctuation.contains(text[index]) {
-                index = text.index(after: index)
-            }
-            while index < text.endIndex, text[index].isWhitespace {
                 index = text.index(after: index)
             }
             return (String(text[..<index]), String(text[index...]))
@@ -52,14 +50,9 @@ public enum NextWordSplitter {
         // No words at all (e.g. only whitespace/symbols) → nothing to sub-divide; accept wholesale.
         guard let firstWordEnd else { return (text, "") }
 
-        // Extend past the word's trailing whitespace (the separator before whatever comes next) so it
-        // travels with the word — but stop at punctuation, leaving it for the next Tab. Whether the
-        // next unit is a word or punctuation, the boundary is the same: the first non-whitespace
-        // character after the word.
-        var index = firstWordEnd
-        while index < text.endIndex, text[index].isWhitespace {
-            index = text.index(after: index)
-        }
-        return (String(text[..<index]), String(text[index...]))
+        // The head is the leading whitespace plus the word itself, stopping at the word's end. Any
+        // trailing whitespace (the separator before whatever comes next) stays with the rest so it
+        // leads the *next* word rather than trailing this one.
+        return (String(text[..<firstWordEnd]), String(text[firstWordEnd...]))
     }
 }
