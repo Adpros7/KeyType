@@ -32,6 +32,156 @@ final class PrefillVsBranchMicroBench: XCTestCase {
         )
     }
 
+    /// ADR-045: separates the COLD completion (fresh cache: clear + full prompt decode +
+    /// sync — what the other benches measure because they `resetKVCache()` each iteration) from the
+    /// WARM/append completion (ADR-018 cross-keystroke path: restore the prior anchor, decode only
+    /// the newly-typed delta). Real typing is the warm path; the cold number is a one-time/cache-miss
+    /// cost. Run:
+    ///   swift test --package-path Packages/ConstrainedGeneration --filter testColdVsWarmCompletion -c release
+    func testColdVsWarmCompletion() async throws {
+        let runtime = try load()
+        let profile = try openProfile(runtime)
+        let config = DecodingConfiguration(maxCandidates: 5, enableFillInMiddle: true)
+        let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profile, configuration: config)
+        let target = AppTarget(bundleIdentifier: "com.apple.TextEdit", appName: "TextEdit", windowTitle: "Untitled")
+
+        func request(_ before: String) -> CompletionRequest {
+            let ctx = TextFieldContext(beforeCursor: before, afterCursor: "", target: target, detectedLanguage: "en")
+            let prompt = PromptBuilder().buildPrompt(context: ctx).prompt
+            return CompletionRequest(context: ctx, prompt: prompt, mode: .prose, maxCompletionTokens: 4, maxDisplayWidth: 60)
+        }
+
+        let base = "I am writing to let you know that the meeting scheduled for tomorrow "
+        let promptTokens = try runtime.tokenizer.tokenize(PromptBuilder().buildPrompt(
+            context: TextFieldContext(beforeCursor: base, afterCursor: "", target: target, detectedLanguage: "en")).prompt).count
+
+        // COLD: reset the cache before every completion (forces clear + full prompt decode).
+        _ = try await engine.completions(for: request(base)) // warm kernels
+        var coldBest = Double.greatestFiniteMagnitude
+        for _ in 0..<5 {
+            await runtime.resetKVCache()
+            let s = try await seconds { _ = try await engine.completions(for: request(base)) } * 1000
+            coldBest = min(coldBest, s)
+        }
+
+        // WARM/append: simulate typing — keep the cache, grow the prompt one word per keystroke so
+        // `ensureAnchor` decodes only the typed delta (ADR-018). Measure each keystroke's completion.
+        let words = ["afternoon", "has", "been", "moved", "to", "a", "later", "time", "so", "that", "everyone", "can"]
+        await runtime.resetKVCache()
+        _ = try await engine.completions(for: request(base)) // prime the anchor
+        var warmTimes: [Double] = []
+        var deltaTokens: [Int] = []
+        var promptLens: [Int] = []
+        var typed = base
+        let prevPromptToks = try runtime.tokenizer.tokenize(PromptBuilder().buildPrompt(
+            context: TextFieldContext(beforeCursor: base, afterCursor: "", target: target, detectedLanguage: "en")).prompt)
+        var prevToks = prevPromptToks
+        for w in words {
+            typed += w + " "
+            let req = request(typed)
+            let toks = try runtime.tokenizer.tokenize(req.prompt)
+            promptLens.append(toks.count)
+            deltaTokens.append(Self.commonPrefix(prevToks, toks))
+            prevToks = toks
+            let s = try await seconds { _ = try await engine.completions(for: req) } * 1000
+            warmTimes.append(s)
+        }
+        let warmBest = warmTimes.min() ?? 0
+        let warmMean = warmTimes.reduce(0, +) / Double(warmTimes.count)
+
+        print("\n================ cold vs warm (append) completion ================")
+        print(String(format: "  prompt tokens (base)            : %d", promptTokens))
+        print(String(format: "  COLD  (resetKVCache each)       : %.1f ms   ◄ what LatencyProfile/sweep report", coldBest))
+        print(String(format: "  WARM  (append delta, ADR-018)   : best %.1f ms | mean %.1f ms   ◄ real typing", warmBest, warmMean))
+        print("  per-keystroke warm latency (ms) : \(warmTimes.map { String(format: "%.1f", $0) })")
+        print("  prompt tokens / keystroke       : \(promptLens)")
+        print("  shared prefix w/ prev prompt    : \(deltaTokens)   (≈ promptLen ⇒ pure append; ≪ ⇒ prefix rewritten)")
+        print(String(format: "  cold − warm                     : %.1f ms attributable to full prompt (re)decode", coldBest - warmBest))
+        print("==================================================================\n")
+
+        await runtime.shutdown()
+    }
+
+    /// Records each `anchoredLogitsBatch` (one per beam level): how many branches, their suffix
+    /// lengths, and wall time — so we can see the per-level cost and the re-decoded-suffix waste
+    /// (the batched path reseeds the anchor and re-decodes each branch's FULL suffix every level).
+    private final class LevelRecorder: LocalModelRuntime {
+        let wrapped: LlamaModelRuntime
+        var metadata: ModelMetadata { wrapped.metadata }
+        var tokenizer: ModelTokenizing { wrapped.tokenizer }
+        struct Level { var branches: Int; var suffixTokens: Int; var maxSuffix: Int; var ms: Double }
+        private(set) var levels: [Level] = []
+        init(_ r: LlamaModelRuntime) { wrapped = r }
+        func reset() { levels = [] }
+
+        func anchoredLogitsBatch(anchor: [TokenID], suffixes: [[TokenID]]) async throws -> [[TokenLogit]] {
+            let start = DispatchTime.now()
+            let r = try await wrapped.anchoredLogitsBatch(anchor: anchor, suffixes: suffixes)
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+            let nonEmpty = suffixes.filter { !$0.isEmpty }
+            levels.append(Level(branches: nonEmpty.count,
+                                suffixTokens: nonEmpty.reduce(0) { $0 + $1.count },
+                                maxSuffix: nonEmpty.map(\.count).max() ?? 0, ms: ms))
+            return r
+        }
+        func prepare(promptTokens: [TokenID]) async throws { try await wrapped.prepare(promptTokens: promptTokens) }
+        func logitsForNextToken() async throws -> [TokenLogit] { try await wrapped.logitsForNextToken() }
+        func decodeNext(tokenID: TokenID) async throws { try await wrapped.decodeNext(tokenID: tokenID) }
+        func resetKVCache() async { await wrapped.resetKVCache() }
+        func shutdown() async { await wrapped.shutdown() }
+    }
+
+    /// Per-level breakdown of the beam (ADR-045 lever #2). Shows branches/suffix-tokens/ms per level
+    /// on a WARM completion, and totals the re-decoded suffix tokens that incremental decoding could
+    /// avoid. Run:
+    ///   swift test --package-path Packages/ConstrainedGeneration --filter testBeamLevelProfile -c release
+    func testBeamLevelProfile() async throws {
+        let runtime = try load()
+        let profile = try openProfile(runtime)
+        let config = DecodingConfiguration(maxCandidates: 5, enableFillInMiddle: true)
+        let rec = LevelRecorder(runtime)
+        let target = AppTarget(bundleIdentifier: "com.apple.TextEdit", appName: "TextEdit", windowTitle: "Untitled")
+
+        func run(_ before: String) async throws -> [String] {
+            let ctx = TextFieldContext(beforeCursor: before, afterCursor: "", target: target, detectedLanguage: "en")
+            let prompt = PromptBuilder().buildPrompt(context: ctx).prompt
+            let req = CompletionRequest(context: ctx, prompt: prompt, mode: .prose, maxCompletionTokens: 4, maxDisplayWidth: 60)
+            let engine = ConstrainedGenerationEngine(runtime: rec, profile: profile, configuration: config)
+            return try await engine.completions(for: req).map(\.text)
+        }
+
+        let cases = [
+            "I am writing to let you know that the meeting scheduled for tomorrow ",
+            "Thanks so much for your help with ",
+            "The quick brown fox jumps over the ",
+            "Please find attached the report for ",
+        ]
+        await runtime.resetKVCache()
+        _ = try await run(cases[0]) // warm kernels + prime anchor
+
+        print("\n================ beam per-level profile (warm, ADR-045 #2) ================")
+        for before in cases {
+            rec.reset()
+            let cands = try await run(before)
+            let total = rec.levels.reduce(0.0) { $0 + $1.ms }
+            let reDecoded = rec.levels.reduce(0) { $0 + $1.suffixTokens }
+            let incremental = rec.levels.reduce(0) { $0 + $1.branches } // 1 new token/branch/level
+            print("  \"\(before.suffix(30))\" → \(cands.first.map { "\"\($0)\"" } ?? "—")   total \(String(format: "%.1f", total)) ms")
+            for (i, l) in rec.levels.enumerated() {
+                print(String(format: "     level %d: %d branch  suffixTok=%d (max %d)  %.1f ms", i + 1, l.branches, l.suffixTokens, l.maxSuffix, l.ms))
+            }
+            print("     re-decoded suffix tokens: \(reDecoded)  vs incremental (1/branch/level): \(incremental)  ⇒ \(reDecoded - incremental) wasted")
+        }
+        print("==========================================================================\n")
+        await runtime.shutdown()
+    }
+
+    private static func commonPrefix(_ a: [TokenID], _ b: [TokenID]) -> Int {
+        var n = 0
+        while n < a.count, n < b.count, a[n] == b[n] { n += 1 }
+        return n
+    }
+
     /// Min-of-`runs` wall-clock seconds of an async op (min rejects scheduler/thermal noise).
     private func minSeconds(_ runs: Int, _ block: () async throws -> Void) async rethrows -> Double {
         var best = Double.greatestFiniteMagnitude
@@ -91,6 +241,22 @@ final class PrefillVsBranchMicroBench: XCTestCase {
         }
         let prefillFit = linearFit(prefillNs.map(Double.init), prefillMs)
 
+        // ---- A2. Isolate snapshot CAPTURE. The no-capture baseline MUST force a GPU sync (read
+        //          logits), else the deferred async decode compute leaks into the delta and inflates
+        //          "capture" to ~20 ms (the original ADR-044 mis-measurement). prepare()+logits reads
+        //          decode+sync without get_data; anchoredLogits() additionally captures. ----
+        let capN = prefix(128)
+        let decodeSyncNoCaptureMs = try await minSeconds(6) {
+            await runtime.resetKVCache()
+            try await runtime.prepare(promptTokens: capN)
+            _ = try await runtime.logitsForNextToken()
+        } * 1000
+        let decodeAndCaptureMs = try await minSeconds(6) {
+            await runtime.resetKVCache()
+            _ = try await runtime.anchoredLogits(anchor: capN, suffix: [])
+        } * 1000
+        let captureMs = decodeAndCaptureMs - decodeSyncNoCaptureMs
+
         // ---- B. Branch depth scaling: resident anchor, restore + decode K-token suffix ----
         _ = try await runtime.anchoredLogits(anchor: anchor, suffix: [])  // make anchor resident
         let branchKs = [1, 2, 3, 4, 6, 8]
@@ -130,16 +296,17 @@ final class PrefillVsBranchMicroBench: XCTestCase {
         let modelAttrs = try? FileManager.default.attributesOfItem(atPath: modelURL.path)
         let modelBytes = (modelAttrs?[.size] as? NSNumber)?.intValue ?? 0
         let modelGiB = Double(modelBytes) / 1_073_741_824.0
-        // Effective BW implied if the per-decode floor were pure weight streaming.
-        let floorMs = branchFit.intercept
-        let impliedBWGiBs = floorMs > 0 ? modelGiB / (floorMs / 1000.0) : 0
-
         // ---- Derived components ----
-        let perDecodeFloor = branchFit.intercept           // restore + dispatch + full-model stream (incl. LM head)
-        let restoreCost = branchFit.intercept - prefillFit.intercept  // branch floor includes a restore; prefill does not
+        // The width-fit INTERCEPT (W→0) is the true per-`llama_decode` floor: dispatch + full-model
+        // weight stream, with no per-branch restore/forward/LM-row. The branch fit's intercept adds
+        // exactly one restore on top of that floor.
+        let perDecodeFloor = widthFit.intercept
+        let restoreCost = max(0, branchFit.intercept - widthFit.intercept) // branch floor = floor + 1 restore
         let perTokenForwardSmall = branchFit.slope         // small-batch sequential forward / token
         let perTokenForwardParallel = prefillFit.slope     // parallel prefill forward / token
-        let perBranchMarginal = widthFit.slope             // restore + forward + extra LM-head output per added branch
+        let perBranchMarginal = widthFit.slope             // restore + forward + extra LM-head row per added branch
+        // Effective BW implied if the per-decode floor were a pure full-model weight stream.
+        let impliedBWGiBs = perDecodeFloor > 0 ? modelGiB / (perDecodeFloor / 1000.0) : 0
 
         print("\n================ KeyType detailed component profile (ADR-043) ================")
         print(String(format: "  model: %@  (%.2f GiB on disk)", modelURL.lastPathComponent, modelGiB))
@@ -152,12 +319,15 @@ final class PrefillVsBranchMicroBench: XCTestCase {
         print(String(format: "     fit: %.2f ms + %.3f ms/branch  (slope = per-added-branch restore+fwd+LM-row)", widthFit.intercept, widthFit.slope))
         print(String(format: "  D) logitsForNextToken readback+materialize : %.3f ms", readbackMs))
         print(String(format: "  E) TokenSampler.rank over full vocab        : %.3f ms", samplerMs))
+        print(String(format: "  F) decode+sync NO-capture(128): %.2f ms   |   decode+capture(128) : %.2f ms", decodeSyncNoCaptureMs, decodeAndCaptureMs))
         print("  -- derived primitives --")
-        print(String(format: "     per-decode FIXED floor (weight stream+dispatch+LM head) : %.2f ms", perDecodeFloor))
-        print(String(format: "       └─ implied effective bandwidth if pure weight stream : %.0f GiB/s (model %.2f GiB)", impliedBWGiBs, modelGiB))
-        print(String(format: "     snapshot restore (per branch seed)                       : %.2f ms", restoreCost))
+        print(String(format: "     per-decode FIXED floor (dispatch + full-model weight stream) : %.2f ms", perDecodeFloor))
+        print(String(format: "       └─ implied effective bandwidth if pure weight stream      : %.0f GiB/s (model %.2f GiB)", impliedBWGiBs, modelGiB))
+        print(String(format: "     snapshot CAPTURE (llama_state_seq_get_data, synced baseline) : %.2f ms  ◄ cheap (ADR-045 corrects ADR-044)", captureMs))
+        print(String(format: "     COLD prompt decode+sync (clear+full re-decode, 128 tok)     : %.2f ms  ◄ the real one-time cost", decodeSyncNoCaptureMs))
+        print(String(format: "     snapshot restore  (set_data, per branch seed)                : %.2f ms", restoreCost))
         print(String(format: "     forward / token  — parallel(prefill) %.3f | small-batch %.3f ms", perTokenForwardParallel, perTokenForwardSmall))
-        print(String(format: "     per-added-branch marginal in a batched decode            : %.2f ms", perBranchMarginal))
+        print(String(format: "     per-added-branch marginal in a batched decode                : %.2f ms", perBranchMarginal))
 
         // ---- Reconcile against a real depth-4 width-4 completion ----
         let target = AppTarget(bundleIdentifier: "com.apple.TextEdit", appName: "TextEdit", windowTitle: "Untitled")
@@ -173,17 +343,22 @@ final class PrefillVsBranchMicroBench: XCTestCase {
             _ = try await ConstrainedGenerationEngine(runtime: runtime, profile: profile, configuration: config).completions(for: request)
         } * 1000
 
-        // Model: prefill(P) + 3 batched levels (≈ floor + width·(restore+fwd of full suffix)) + sampling.
-        let modeledPrefill = prefillFit.intercept + prefillFit.slope * Double(promptTokens)
-        let modeledLevels = (1...3).reduce(0.0) { acc, d in acc + perDecodeFloor + 4.0 * (restoreCost + perTokenForwardSmall * Double(d)) }
+        // Model the COLD path: one full prompt decode+sync (clear path — measured directly at F, not
+        // the warm batched floor, because clearing the cache triggers a much larger Metal floor),
+        // a cheap capture, then 3 batched frontier levels, plus CPU readback/sampling per branch.
+        let modeledPromptDecode = decodeSyncNoCaptureMs
+        let modeledLevels = (1...3).reduce(0.0) { acc, d in
+            acc + perDecodeFloor + 4.0 * (restoreCost + perTokenForwardSmall * Double(d))
+        }
         let modeledSampling = 13.0 * (readbackMs + samplerMs)
-        let modeled = modeledPrefill + modeledLevels + modeledSampling
+        let modeled = modeledPromptDecode + captureMs + modeledLevels + modeledSampling
 
         print("  -- reconciliation: real depth-4 width-4 completion --")
         print(String(format: "     prompt tokens %d", promptTokens))
         print(String(format: "     measured completion        : %.1f ms", real))
         print(String(format: "     modeled from primitives    : %.1f ms", modeled))
-        print(String(format: "       ├─ prefill (1×)          : %.1f ms (%.0f%%)", modeledPrefill, modeledPrefill / modeled * 100))
+        print(String(format: "       ├─ prompt decode (1×)    : %.1f ms (%.0f%%)", modeledPromptDecode, modeledPromptDecode / modeled * 100))
+        print(String(format: "       ├─ snapshot capture (1×) : %.1f ms (%.0f%%)", captureMs, captureMs / modeled * 100))
         print(String(format: "       ├─ 3 batched levels      : %.1f ms (%.0f%%)", modeledLevels, modeledLevels / modeled * 100))
         print(String(format: "       └─ readback+sampling     : %.1f ms (%.0f%%)", modeledSampling, modeledSampling / modeled * 100))
         print("=============================================================================\n")

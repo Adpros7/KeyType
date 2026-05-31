@@ -1737,3 +1737,133 @@ text. Both are now closed:
     exact-order assertions were relaxed to argmax + set across all KV-reuse tests.
   - Memory: ~one recurrent-state buffer per sequence (~19 MB × 4 ≈ ~76 MB resident), well under the
     ~300 MB ADR-012 flagged for `n_seq_max=16`.
+
+## ADR-044: Detailed component profile — snapshot **capture**, not the LM head, is the next lever
+
+> **Superseded in part by ADR-045.** The "~20 ms snapshot capture" headline below is a
+> **measurement artifact** and is wrong: `prepare(N)` returns before the GPU finishes (it never
+> reads logits / forces a sync), so the deferred prompt-decode compute leaked into the capture
+> delta. With a properly-synced no-capture baseline the capture is **~0.3 ms**; the ~20 ms is the
+> **cold prompt decode** itself. See ADR-045 for the correction and the real lever. The per-decode
+> floor, bandwidth cross-check, restore (~1 ms), forward/token, and CPU numbers below all stand.
+
+- Date: 2026-05-31
+- Status: accepted (measurement only; no code/behavior change); capture finding corrected by ADR-045
+- Context: Before optimizing the LM-head projection we profiled the warm completion in detail
+  (`PrefillVsBranchMicroBench.testDetailedComponentProfile`, release, M5 Max, Qwen3.5-2B-Base
+  Q4_K_M, 1.19 GiB on disk). Rather than algebraically guessing components, it times directly-
+  measurable primitives and linear-fits the ones that scale, then reconciles against a real
+  depth-4 width-4 completion. Method, so it can be re-run as the model/hardware change:
+  - **Prefill scaling** (cold decode of N tokens, N∈{16…256}).
+  - **Branch-depth scaling** (resident anchor → restore + decode K-token suffix, K∈{1…8}): fit
+    intercept = floor + 1 restore; slope = small-batch forward/token.
+  - **Batch-width scaling** (W branches × 1 token in one decode, W∈{1…4}): fit **intercept = the
+    true per-`llama_decode` floor** (dispatch + full-model weight stream, no per-branch work);
+    slope = per-added-branch (restore + forward + LM-head row).
+  - **Capture isolation**: `prepare(N)` decodes **without** `llama_state_seq_get_data`; the anchored
+    path decodes **and** captures. Same N ⇒ the difference is the capture cost.
+  - CPU side: `logitsForNextToken` readback and `TokenSampler.rank` timed in isolation.
+- Findings (min-of-N, warm):
+  - **Per-`llama_decode` fixed floor ≈ 3.45 ms** = dispatch + streaming the **whole** 1.19 GiB model
+    once. Cross-check: 1.19 GiB / 3.45 ms ⇒ ~344 GiB/s, i.e. the floor is HBM-bandwidth-bound on the
+    full weight set. The 151,936-wide **LM head is only ~1/5 of that** (`output.weight` ≈ 230 MB of
+    1.19 GiB), so it is **~0.7 ms/decode × 4 decodes ≈ 3 ms (~4%)** of the completion — *not* worth a
+    custom kernel on its own.
+  - **Snapshot CAPTURE (`llama_state_seq_get_data`) ≈ 20 ms** — the surprise. `prepare(128)` decode-
+    only = 2.0 ms, but decode **+capture**(128) = 22.4 ms. It is essentially fixed (dominated by
+    serializing this hybrid model's large recurrent SSM state, not the per-token attention KV), and
+    happens **once per completion** (and once per keystroke in live typing, when `ensureAnchor`
+    re-captures the grown prompt). At ~33% of the 65 ms completion this is now the single biggest
+    lever — it is the hidden price of the ADR-018/043 snapshot/restore design (chosen because
+    `seq_cp` aborts on hybrid memory).
+  - Restore (`set_data`, per branch seed) ≈ 0.62 ms — cheap, confirming ADR-043. Forward/token:
+    ~0.016 ms parallel (big prefill ubatch) vs ~0.50 ms small-batch. Readback ≈ 0.02 ms, sampler
+    ≈ 0.14 ms — CPU is noise.
+  - **Reconciliation** of the real 65.0 ms completion (modeled 61.5 ms, ~5%): prompt decode 15%,
+    **snapshot capture 33%**, 3 batched frontier levels 48% (≈ 3 × 3.45 ms floor + 12 restores +
+    branch forwards), readback+sampling 3%.
+- Decision: **Do not** pursue an LM-head-specific optimization next; its ceiling is ~4%. Rank the
+  real levers by the profile:
+  1. **Kill / amortize the ~20 ms capture** (largest single cost). Options to investigate: re-check
+     whether the current llama.cpp supports `seq_cp` on this hybrid memory (would replace one 20 ms
+     `get_data` + N×`set_data` with cheap intra-graph copies); capture lazily only when a level
+     actually branches; or avoid the snapshot entirely by keeping the anchor live and seeding
+     branches another way. Quality envelope (ADR-012/018/043) must hold.
+  2. **Fewer decodes** (already 13→4 via ADR-043): confidence-gated / adaptive beam width cuts the
+     3.45 ms floor × levels further and stacks on the batched API.
+  3. The per-decode floor itself is full-model bandwidth — only a smaller/more-quantized model moves
+     it; out of scope for a no-quality-loss change.
+
+## ADR-045: The "20 ms capture" was a sync artifact — capture is ~0.3 ms; 65 ms is a cold-cache number
+
+- Date: 2026-05-31
+- Status: accepted (measurement + analysis; the only code change is reverting a probe — see below)
+- Context: Investigating ADR-044's top lever ("kill the ~20 ms snapshot capture") produced three
+  results that overturn it. Probes added to `PrefillVsBranchMicroBench`
+  (`testDetailedComponentProfile`, `testColdVsWarmCompletion`); the llama.cpp build now exposes the
+  `llama_state_seq_*_ext` APIs with `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`.
+  1. **ON_DEVICE snapshots give zero speedup.** Wiring capture/restore through the `_ext` APIs with
+     `ON_DEVICE` (keep the serialized state in device buffers, skip the host round-trip) was gated
+     on-device: it does **not** abort on this hybrid recurrent memory and keeps the candidate set
+     byte-identical, but capture stayed ~20 ms (20.8 vs 20.7 ms). So there was no host round-trip to
+     remove — the cost was not a serialize/transfer at all. The flag was reverted (no benefit, added
+     surface); the proven `llama_state_seq_get_data`/`set_data` path is unchanged.
+  2. **The "~20 ms capture" was a measurement artifact.** ADR-044 isolated capture as
+     `anchoredLogits(N,[])` − `prepare(N)`. But `prepare(N)` returns **before the GPU finishes** — it
+     never reads logits, so it never forces a sync — while `anchoredLogits` reads logits/captures and
+     therefore *does* sync. The delta was the **deferred prompt-decode compute**, not capture. With a
+     properly-synced no-capture baseline (`prepare(N)` **+ `logitsForNextToken()`**) the delta is
+     **~0.3 ms**: capture (`llama_state_seq_get_data`) is cheap. Restore is ~1 ms/branch (confirms
+     ADR-043). The ~20 ms is the **cold prompt decode** (clear + full forward + sync): the cold
+     prefill floor is ~15 ms vs the warm batched per-decode floor of ~3.1 ms — a ~12 ms gap that is
+     `llama_memory_clear(true)` + first-decode Metal graph/buffer reallocation.
+  3. **The headline 65 ms is a cold-cache benchmark artifact.** Every bench (`LatencyProfileTests`,
+     the sweeps) calls `resetKVCache()` each iteration, forcing the clear + full prompt re-decode.
+     Real typing is a **pure ~1-token append** (verified: each keystroke's prompt shares all but its
+     last token with the previous one, because `beforeCursor` is effectively the prompt tail), so
+     ADR-018's append path decodes only the typed delta. Measured: **cold 64 ms vs warm/append best
+     ~33 ms / mean ~46 ms** — steady-state per-keystroke latency is ~half the reported cold number.
+     The ~31 ms `cold − warm` gap is exactly the full prompt re-decode that the append path already
+     avoids after the first keystroke.
+- Corrected component breakdown of the 65 ms **cold** completion (modeled 57.7 ms vs measured 65.3,
+  ~12%): cold prompt decode+sync **~22 ms (38%)**, capture ~0.3 ms (1%), 3 batched frontier levels
+  **~33 ms (58%)**, readback+sampling ~2 ms (4%).
+- Decision / revised lever ranking for "halve latency, no quality loss":
+  1. **Report and optimize the right number.** Steady-state typing is already ~33–46 ms, not 65 ms;
+     the cold 65 ms hits only the first keystroke / on a cache miss (prefix rewrite, app/window
+     change, large edit). Latency work should target the **warm** path.
+  2. **Cut the 3 batched levels (~33 ms, 58% — now the dominant steady-state cost).** This is
+     ADR-044's lever #2: confidence-gated / adaptive beam **width** and **depth** remove whole
+     branches/levels, each saving a ~3.1 ms floor + ~1 ms/branch restore + branch forwards. Also
+     worth probing: the per-level `llama_memory_clear(true)` + re-seed in `decodeBranchGroup` may
+     itself pay part of the realloc tax 3× per completion.
+
+### ADR-045 lever #2 follow-up — per-level profile points at incremental beam decoding
+
+- `testBeamLevelProfile` records each beam level (one `anchoredLogitsBatch`) on the warm path. The
+  level cost **grows with depth** — e.g. on the "tomorrow " case: level 2 (4 branches, 4 suffix tok)
+  10.2 ms, level 3 (4, 8 tok) 11.8 ms, level 4 (4, 12 tok) 19.4 ms — because `decodeBranchGroup`
+  reseeds the anchor snapshot and **re-decodes each branch's entire suffix from scratch every
+  level**. A full depth-4 width-4 completion re-decodes ~24 suffix tokens where incremental decoding
+  (one new token per live branch per level) needs ~12 — **~12 wasted token-forwards** (~6 ms) plus
+  the ~11 anchor re-restores (~1 ms each) that carry them.
+- The per-level `llama_memory_clear(true)` is **not** a villain in steady state: the warm batched
+  per-decode floor is ~3.1 ms (vs the ~15 ms cold prefill floor), so the clear/realloc is a
+  one-time post-`resetKVCache` cost, not paid per level once warm. Adaptive **width** is also largely
+  already happening — `prune`/`relativeCutoff` collapses the beam to 1 branch when the model is
+  confident (the "brown fox → lazy dog" case finishes in 2 levels); tightening the cutoff would drop
+  real candidates (changes the set), so it is **not** a no-quality-loss lever.
+- **Proposed fix: incremental beam decoding.** Keep each live branch resident in its own sequence
+  and decode only its **one new token** per level, instead of reseeding the anchor and re-decoding
+  the whole suffix. A branch with a single surviving child extends its sequence in place (no restore,
+  no re-decode); a branch that forks into K>1 kept children copies its state (cheap now that capture
+  is ~0.3 ms + restore ~1 ms) into K−1 free sequences. Prune to `branchWidth` *before* allocating
+  sequences, so ≤ `branchWidth` live sequences are ever needed. Expected to cut the levels from
+  ~33 ms toward ~18–22 ms with **identical** logits (same forward passes, just cached — within the
+  ADR-012/018/043 split-recurrent envelope already accepted). Cost: a stateful branch-handle runtime
+  API + sequence lifecycle management in `LlamaModelRuntime` (a milestone-sized, correctness-sensitive
+  change), gated by `AnchoredLogitsCorrectnessTests` + a candidate-set equality test vs the reseed
+  path.
+  3. **Warm the first keystroke.** Pre-decode/seed the cache at session start (or on focus) so the
+     first real completion isn't a cold ~22 ms clear+decode. Cheap, one-time, no quality impact.
+  4. LM head (~4%) and capture (~0.5%) are **not** worth optimizing — both were dead ends.
