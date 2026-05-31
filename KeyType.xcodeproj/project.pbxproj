@@ -10,7 +10,6 @@
 		20DD9A7F2FC95AB900BE1F8C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 20DD9A7A2FC95AB900BE1F8C /* Assets.xcassets */; };
 		20DD9A822FC95AB900BE1F8C /* KeyTypeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20DD9A7D2FC95AB900BE1F8C /* KeyTypeApp.swift */; };
 		20DD9A852FC95ABB00BE1F8C /* KeyTypeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20DD9A832FC95ABB00BE1F8C /* KeyTypeTests.swift */; };
-		4B5450012FC9600000000091 /* OnboardingAndKeybindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000090 /* OnboardingAndKeybindTests.swift */; };
 		20DD9A892FC95ABD00BE1F8C /* KeyTypeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20DD9A862FC95ABD00BE1F8C /* KeyTypeUITests.swift */; };
 		20DD9A8A2FC95ABD00BE1F8C /* KeyTypeUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20DD9A872FC95ABD00BE1F8C /* KeyTypeUITestsLaunchTests.swift */; };
 		4B5450012FC9600000000001 /* AutocompleteCore in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC9600000000011 /* AutocompleteCore */; };
@@ -22,8 +21,6 @@
 		4B5450012FC9600000000007 /* CompletionUI in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC9600000000017 /* CompletionUI */; };
 		4B5450012FC9600000000008 /* TextInsertion in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC9600000000018 /* TextInsertion */; };
 		4B5450012FC9600000000009 /* AppCompatibility in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC9600000000019 /* AppCompatibility */; };
-		4B5450012FC96000000000F0 /* LaunchAtLogin in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC96000000000F1 /* LaunchAtLogin */; };
-		4B5450012FC9600000000201 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC9600000000200 /* Sparkle */; };
 		4B5450012FC960000000000A /* KeyTypeModuleGraph.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC960000000000B /* KeyTypeModuleGraph.swift */; };
 		4B5450012FC9600000000030 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000031 /* AppDelegate.swift */; };
 		4B5450012FC9600000000032 /* PermissionsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000033 /* PermissionsManager.swift */; };
@@ -45,6 +42,7 @@
 		4B5450012FC9600000000081 /* AcceptanceShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000080 /* AcceptanceShortcut.swift */; };
 		4B5450012FC9600000000083 /* ModelSetupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000082 /* ModelSetupCoordinator.swift */; };
 		4B5450012FC9600000000085 /* KeyRecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000084 /* KeyRecorderView.swift */; };
+		4B5450012FC9600000000091 /* OnboardingAndKeybindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000090 /* OnboardingAndKeybindTests.swift */; };
 		4B5450012FC96000000000A0 /* GeneralSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC96000000000A1 /* GeneralSettingsView.swift */; };
 		4B5450012FC96000000000A2 /* ModelSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC96000000000A3 /* ModelSettingsView.swift */; };
 		4B5450012FC96000000000A4 /* ShortcutsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC96000000000A5 /* ShortcutsSettingsView.swift */; };
@@ -62,6 +60,8 @@
 		4B5450012FC96000000000CB /* PermissionGuidanceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC96000000000CC /* PermissionGuidanceController.swift */; };
 		4B5450012FC96000000000CD /* ScreenFrameReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC96000000000CE /* ScreenFrameReader.swift */; };
 		4B5450012FC96000000000D1 /* KeyType.icon in Resources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC96000000000D0 /* KeyType.icon */; };
+		4B5450012FC96000000000F0 /* LaunchAtLogin in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC96000000000F1 /* LaunchAtLogin */; };
+		4B5450012FC9600000000201 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 4B5450012FC9600000000200 /* Sparkle */; };
 		4B5450012FC9600000000211 /* UpdaterController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B5450012FC9600000000210 /* UpdaterController.swift */; };
 /* End PBXBuildFile section */
 
@@ -89,7 +89,6 @@
 		20DD9A7A2FC95AB900BE1F8C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		20DD9A7D2FC95AB900BE1F8C /* KeyTypeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyTypeApp.swift; sourceTree = "<group>"; };
 		20DD9A832FC95ABB00BE1F8C /* KeyTypeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyTypeTests.swift; sourceTree = "<group>"; };
-		4B5450012FC9600000000090 /* OnboardingAndKeybindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingAndKeybindTests.swift; sourceTree = "<group>"; };
 		20DD9A862FC95ABD00BE1F8C /* KeyTypeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyTypeUITests.swift; sourceTree = "<group>"; };
 		20DD9A872FC95ABD00BE1F8C /* KeyTypeUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyTypeUITestsLaunchTests.swift; sourceTree = "<group>"; };
 		4B5450012FC960000000000B /* KeyTypeModuleGraph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyTypeModuleGraph.swift; sourceTree = "<group>"; };
@@ -103,7 +102,6 @@
 		4B5450012FC9600000000044 /* FieldFontResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FieldFontResolver.swift; sourceTree = "<group>"; };
 		4B5450012FC9600000000046 /* SystemWordRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemWordRecognizer.swift; sourceTree = "<group>"; };
 		4B5450012FC9600000000049 /* KeyType.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = KeyType.entitlements; sourceTree = "<group>"; };
-		4B5450012FC9600000000220 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		4B5450012FC9600000000054 /* PredictionLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictionLog.swift; sourceTree = "<group>"; };
 		4B5450012FC9600000000063 /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
 		4B5450012FC9600000000065 /* WritingHistoryRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WritingHistoryRecorder.swift; sourceTree = "<group>"; };
@@ -111,6 +109,7 @@
 		4B5450012FC9600000000080 /* AcceptanceShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcceptanceShortcut.swift; sourceTree = "<group>"; };
 		4B5450012FC9600000000082 /* ModelSetupCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSetupCoordinator.swift; sourceTree = "<group>"; };
 		4B5450012FC9600000000084 /* KeyRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyRecorderView.swift; sourceTree = "<group>"; };
+		4B5450012FC9600000000090 /* OnboardingAndKeybindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingAndKeybindTests.swift; sourceTree = "<group>"; };
 		4B5450012FC96000000000A1 /* GeneralSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralSettingsView.swift; sourceTree = "<group>"; };
 		4B5450012FC96000000000A3 /* ModelSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettingsView.swift; sourceTree = "<group>"; };
 		4B5450012FC96000000000A5 /* ShortcutsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutsSettingsView.swift; sourceTree = "<group>"; };
@@ -129,6 +128,7 @@
 		4B5450012FC96000000000CE /* ScreenFrameReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenFrameReader.swift; sourceTree = "<group>"; };
 		4B5450012FC96000000000D0 /* KeyType.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = KeyType.icon; sourceTree = "<group>"; };
 		4B5450012FC9600000000210 /* UpdaterController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterController.swift; sourceTree = "<group>"; };
+		4B5450012FC9600000000220 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -258,12 +258,15 @@
 			path = Logic;
 			sourceTree = "<group>";
 		};
-		4B5450012FC9600000000212 /* Updates */ = {
+		4B5450012FC96000000000C0 /* Permission */ = {
 			isa = PBXGroup;
 			children = (
-				4B5450012FC9600000000210 /* UpdaterController.swift */,
+				4B5450012FC96000000000C2 /* PermissionKind.swift */,
+				4B5450012FC9600000000033 /* PermissionsManager.swift */,
+				4B5450012FC960000000010A /* System */,
+				4B5450012FC9600000000109 /* Guidance */,
 			);
-			path = Updates;
+			path = Permission;
 			sourceTree = "<group>";
 		};
 		4B5450012FC9600000000100 /* Completion */ = {
@@ -293,17 +296,6 @@
 				4B5450012FC9600000000082 /* ModelSetupCoordinator.swift */,
 			);
 			path = Models;
-			sourceTree = "<group>";
-		};
-		4B5450012FC96000000000C0 /* Permission */ = {
-			isa = PBXGroup;
-			children = (
-				4B5450012FC96000000000C2 /* PermissionKind.swift */,
-				4B5450012FC9600000000033 /* PermissionsManager.swift */,
-				4B5450012FC960000000010A /* System */,
-				4B5450012FC9600000000109 /* Guidance */,
-			);
-			path = Permission;
 			sourceTree = "<group>";
 		};
 		4B5450012FC9600000000103 /* Settings */ = {
@@ -381,6 +373,14 @@
 				4B5450012FC96000000000C6 /* SystemSettingsWindowLocator.swift */,
 			);
 			path = System;
+			sourceTree = "<group>";
+		};
+		4B5450012FC9600000000212 /* Updates */ = {
+			isa = PBXGroup;
+			children = (
+				4B5450012FC9600000000210 /* UpdaterController.swift */,
+			);
+			path = Updates;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -750,7 +750,7 @@
 				CODE_SIGN_ENTITLEMENTS = KeyType/KeyType.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = KM2C4ZAVPJ;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -763,7 +763,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.pattonium.KeyType;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -784,7 +784,7 @@
 				CODE_SIGN_ENTITLEMENTS = KeyType/KeyType.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = KM2C4ZAVPJ;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -797,7 +797,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.pattonium.KeyType;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -948,10 +948,6 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/ModelRuntime;
 		};
-		4B5450012FC9600000000070 /* XCLocalSwiftPackageReference "Packages/ModelManagement" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = Packages/ModelManagement;
-		};
 		4B5450012FC9600000000023 /* XCLocalSwiftPackageReference "Packages/TokenProfiles" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/TokenProfiles;
@@ -976,6 +972,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/Personalization;
 		};
+		4B5450012FC9600000000070 /* XCLocalSwiftPackageReference "Packages/ModelManagement" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/ModelManagement;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -998,16 +998,6 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		4B5450012FC96000000000F1 /* LaunchAtLogin */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 4B5450012FC96000000000F2 /* XCRemoteSwiftPackageReference "LaunchAtLogin-Modern" */;
-			productName = LaunchAtLogin;
-		};
-		4B5450012FC9600000000200 /* Sparkle */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 4B5450012FC9600000000202 /* XCRemoteSwiftPackageReference "Sparkle" */;
-			productName = Sparkle;
-		};
 		4B5450012FC9600000000011 /* AutocompleteCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 4B5450012FC9600000000010 /* XCLocalSwiftPackageReference "Packages/AutocompleteCore" */;
@@ -1072,6 +1062,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 4B5450012FC9600000000070 /* XCLocalSwiftPackageReference "Packages/ModelManagement" */;
 			productName = ModelProfileGeneration;
+		};
+		4B5450012FC96000000000F1 /* LaunchAtLogin */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4B5450012FC96000000000F2 /* XCRemoteSwiftPackageReference "LaunchAtLogin-Modern" */;
+			productName = LaunchAtLogin;
+		};
+		4B5450012FC9600000000200 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4B5450012FC9600000000202 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

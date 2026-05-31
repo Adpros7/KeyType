@@ -2353,3 +2353,29 @@ text. Both are now closed:
   tests: `SuffixOverlapGuardTruncationTests` (AutocompleteCore); `GenerationBranchTruncationTests`,
   `DecodingConfigurationTests`, engine truncation/drop + rerank flip/no-op cases, and FIM windowing cases
   (ConstrainedGeneration). `swift build` + `swift test -c release` green for both packages (65 and 109).
+
+## ADR-058 — Show a Dock icon while a main window (Settings / setup) is open
+
+- Date: 2026-06-01
+- Status: accepted
+- Context: KeyType ships as a dockless menu-bar agent — `LSUIElement` in `Info.plist` plus
+  `setActivationPolicy(.accessory)` at launch (ADR-005). That's the right default during normal use
+  (the app lives in the menu bar and shouldn't clutter the Dock or ⌘-Tab), but it makes the app's own
+  windows awkward to return to: once you click away from the Settings or onboarding/setup window there
+  is no Dock icon or ⌘-Tab entry to switch back to, so the window is effectively lost behind other apps.
+- Decision: temporarily promote KeyType to `.regular` (dock-visible) while either main window — the
+  Settings window or the onboarding/setup window — is on screen, then revert to `.accessory` once they
+  are all closed. `AppDelegate` tracks the set of visible main-window IDs (`dockVisibleWindowIDs`) and
+  exposes `mainWindowDidAppear(id:)` / `mainWindowDidDisappear(id:)`. The policy flips to `.regular`
+  (followed by `NSApp.activate`) only when the set goes from empty to non-empty, and back to `.accessory`
+  only when the last window closes. The window scenes in `KeyTypeApp` drive this via `.onAppear` /
+  `.onDisappear`, passing their existing window-ID constants. `LSUIElement` stays `true`: it only governs
+  launch state, and Apple's pattern for agent apps is to toggle the activation policy at runtime rather
+  than remove the plist key.
+- Consequences: while Settings or setup is open, KeyType has a normal Dock icon and ⌘-Tab entry, so
+  switching back to it is trivial; the moment both are dismissed it returns to a pure menu-bar agent. A
+  set (rather than a bool or counter) keeps the toggle idempotent against repeated `onAppear` calls and
+  correct when both windows overlap (closing one while the other is open keeps the Dock icon). The
+  completion/AX pipeline is untouched — this is purely presentation. Trade-off: SwiftUI `onDisappear`
+  semantics for `Window` scenes are the close signal; if a future macOS regression stops firing it on a
+  red-button close, the revert would need an `NSWindow` close observer instead.

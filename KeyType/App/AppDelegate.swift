@@ -49,6 +49,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `syncContextCaptureWithPermission()` is suppressed — otherwise the 1 Hz permission timer would
     /// restart the tracker mid-panel and re-trigger the hang.
     private var isPresentingImportPanel = false
+    /// IDs of the main windows (Settings, onboarding/setup) currently on screen. KeyType normally runs
+    /// as a dockless `.accessory` agent, but while one of these windows is open we promote it to a
+    /// `.regular` (dock-visible) app so the user can ⌘-Tab back and forth like a normal app, then
+    /// revert once they're all closed. A set (not a counter/bool) keeps this idempotent against repeated
+    /// `onAppear` calls and correct when both windows overlap. See ADR-058.
+    private var dockVisibleWindowIDs: Set<String> = []
 
     override init() {
         let permissions = PermissionsManager()
@@ -184,6 +190,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Keep running as a menu-bar agent even after the onboarding window is dismissed.
         false
+    }
+
+    /// Show the Dock icon while one of KeyType's main windows (Settings, onboarding/setup) is open.
+    /// The app ships as a `.accessory` (menu-bar-only) agent, but a dockless app is awkward to switch
+    /// back to once you've clicked away from its window; promoting to `.regular` gives the window a Dock
+    /// icon and a normal ⌘-Tab entry. Idempotent, and only flips the policy on the first window to open.
+    /// See ADR-058.
+    func mainWindowDidAppear(id: String) {
+        let wasEmpty = dockVisibleWindowIDs.isEmpty
+        dockVisibleWindowIDs.insert(id)
+        guard wasEmpty else { return }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Revert to the dockless `.accessory` policy once the last main window closes, so KeyType
+    /// disappears from the Dock and ⌘-Tab and goes back to being a pure menu-bar agent. See ADR-058.
+    func mainWindowDidDisappear(id: String) {
+        guard dockVisibleWindowIDs.remove(id) != nil, dockVisibleWindowIDs.isEmpty else { return }
+        NSApp.setActivationPolicy(.accessory)
     }
 
     /// Gate every quit path (menu item, ⌘Q) behind a confirmation, then tear the model down before

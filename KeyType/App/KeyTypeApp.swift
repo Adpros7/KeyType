@@ -32,6 +32,9 @@ struct KeyTypeApp: App {
                 .environment(appDelegate.permissions)
                 .environment(appDelegate.settings)
                 .environment(appDelegate.modelSetup)
+                // Give the setup window a Dock icon while it's open, mirroring Settings. See ADR-058.
+                .onAppear { appDelegate.mainWindowDidAppear(id: AppDelegate.onboardingWindowID) }
+                .onDisappear { appDelegate.mainWindowDidDisappear(id: AppDelegate.onboardingWindowID) }
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
@@ -52,6 +55,10 @@ struct KeyTypeApp: App {
                 reloadModel: { appDelegate.completion.reloadModel() },
                 importModel: { appDelegate.presentModelImportPanel() }
             )
+            // Promote KeyType to a dock-visible app while Settings is open so it's easy to switch
+            // back to, then drop back to the menu-bar-only agent policy on close. See ADR-058.
+            .onAppear { appDelegate.mainWindowDidAppear(id: AppDelegate.settingsWindowID) }
+            .onDisappear { appDelegate.mainWindowDidDisappear(id: AppDelegate.settingsWindowID) }
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
