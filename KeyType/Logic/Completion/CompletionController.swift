@@ -663,7 +663,14 @@ final class CompletionController {
         generationTask?.cancel()
         warmupTask?.cancel()
         latestContext = context.replacingBeforeCursor(context.beforeCursor + head)
-        visibleCandidate = rest.isEmpty ? nil : CompletionCandidate(text: rest, mode: .prose)
+        let remainder = rest.isEmpty ? nil : CompletionCandidate(text: rest, mode: .prose)
+        visibleCandidate = remainder
+        // Redraw the shrunk remainder immediately rather than waiting for the post-insertion AX
+        // snapshot to re-pin it. That snapshot is near-instant in web fields but lags by tens-to-
+        // hundreds of ms in many native apps, so without this the ghost text visibly stalls after a
+        // Tab until the next notification (or generation) lands. The AX path still re-pins precisely
+        // once it arrives. See ADR-054.
+        presenter.advanceAfterAccepting(head: head, remainder: remainder)
         insert(text: head, context: context, keepingAnchor: true)
     }
 

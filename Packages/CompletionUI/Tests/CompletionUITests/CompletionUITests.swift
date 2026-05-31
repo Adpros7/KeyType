@@ -219,6 +219,30 @@ final class CompletionUITests: XCTestCase {
         XCTAssertLessThan(layout.frame.height, 40)
     }
 
+    // MARK: - Advance past an accepted word
+
+    @MainActor
+    func testAdvancedPlacementShiftsCaretRightwardForLTR() {
+        let placement = OverlayPlacement(cursorRect: CGRect(x: 40, y: 20, width: 2, height: 16))
+        let advanced = GhostTextOverlayWindow.advanced(placement, byAcceptedWidth: 30)
+
+        // LTR: the caret moves rightward by the accepted width, so the remainder draws where it
+        // already sat (the old caret.maxX + headWidth).
+        XCTAssertEqual(advanced.cursorRect.minX, 70)
+        XCTAssertEqual(advanced.cursorRect.maxX, placement.cursorRect.maxX + 30)
+        XCTAssertEqual(advanced.cursorRect.minY, placement.cursorRect.minY)
+        XCTAssertEqual(advanced.cursorRect.height, placement.cursorRect.height)
+    }
+
+    @MainActor
+    func testAdvancedPlacementShiftsCaretLeftwardForRTL() {
+        let placement = OverlayPlacement(cursorRect: CGRect(x: 40, y: 20, width: 2, height: 16), isRightToLeft: true)
+        let advanced = GhostTextOverlayWindow.advanced(placement, byAcceptedWidth: 30)
+
+        XCTAssertEqual(advanced.cursorRect.minX, 10)
+        XCTAssertTrue(advanced.isRightToLeft)
+    }
+
     // MARK: - Capsule layout
 
     @MainActor

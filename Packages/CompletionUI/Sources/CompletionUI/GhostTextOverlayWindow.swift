@@ -18,6 +18,10 @@ public final class GhostTextOverlayWindow {
     private lazy var window: NSPanel = makeWindow()
     private let hosting = NSHostingView(rootView: AnyView(EmptyView()))
 
+    /// The parameters of the last `show`, kept so the overlay can be advanced past an accepted word
+    /// without waiting for an AX snapshot (`advanceAfterAccepting`). Cleared on `hide`.
+    private var lastShow: (text: String, font: NSFont, placement: OverlayPlacement, textColor: NSColor?)?
+
     /// Capsule geometry: padding inside the pill and the gap between the caret and the pill's top.
     static let capsuleHorizontalPadding = CapsuleCompletionView.defaultHorizontalPadding
     static let capsuleVerticalPadding = CapsuleCompletionView.defaultVerticalPadding
@@ -69,10 +73,39 @@ public final class GhostTextOverlayWindow {
         if !window.isVisible {
             window.orderFrontRegardless()
         }
+
+        lastShow = (text, font, placement, textColor)
+    }
+
+    /// Eagerly shrink the shown inline ghost text past an accepted word: shift it by the rendered
+    /// width of `head` and redraw `remainder`, *now*, instead of waiting for the target app's AX
+    /// value-changed notification. That notification lags the keystroke by tens-to-hundreds of ms in
+    /// many native apps (it's near-instant in web fields), so without this the remainder visibly
+    /// stalls after each Tab until the next snapshot lands. Because the prior overlay already drew
+    /// `remainder` at exactly `head`'s width past the caret, shifting by that width lands it where it
+    /// already sat on screen; the later AX snapshot re-pins it precisely. No-op for the capsule
+    /// presentation (mid-line), which the AX path keeps repositioning. See ADR-054.
+    public func advanceAfterAccepting(head: String, remainder: String) {
+        guard let last = lastShow, last.placement.presentation == .inlineGhost else { return }
+        guard !remainder.isEmpty else { hide(); return }
+        let headWidth = Self.measuredWidth(head, font: last.font)
+        let placement = Self.advanced(last.placement, byAcceptedWidth: headWidth)
+        show(text: remainder, font: last.font, placement: placement, textColor: last.textColor)
+    }
+
+    /// Shift an inline-ghost placement's caret rect by `width` along the writing direction (rightward
+    /// for LTR, leftward for RTL), so the post-acceptance remainder draws where it already appeared.
+    static func advanced(_ placement: OverlayPlacement, byAcceptedWidth width: CGFloat) -> OverlayPlacement {
+        var result = placement
+        let caret = placement.cursorRect
+        let newX = placement.isRightToLeft ? caret.minX - width : caret.minX + width
+        result.cursorRect = CGRect(x: newX, y: caret.minY, width: caret.width, height: caret.height)
+        return result
     }
 
     public func hide() {
         window.orderOut(nil)
+        lastShow = nil
     }
 
     public var isVisible: Bool { window.isVisible }
@@ -335,6 +368,14 @@ public final class InlineGhostTextPresenter: CompletionOverlayPresenting {
     public func hide() {
         window.hide()
         visibleCandidate = nil
+    }
+
+    /// Advance the inline ghost text past an accepted `head`, redrawing `remainder` immediately
+    /// rather than waiting for the next focused-field snapshot. See `GhostTextOverlayWindow`. Hides
+    /// the overlay when nothing remains. No-op for the capsule presentation.
+    public func advanceAfterAccepting(head: String, remainder: CompletionCandidate?) {
+        window.advanceAfterAccepting(head: head, remainder: remainder?.text ?? "")
+        visibleCandidate = remainder
     }
 
     public var isVisible: Bool { window.isVisible }

@@ -2199,3 +2199,39 @@ text. Both are now closed:
   must continue because the visible top suggestion can still change. The production latency profile
   now shows the short append case completing in about 34 ms with two batched decode calls, while
   medium/long/FIM cases remain in the same release-profile range as before.
+
+## ADR-054 — Redraw the remaining ghost text eagerly on Tab acceptance, not on the next snapshot
+
+- Date: 2026-06-01
+- Status: accepted
+- Context: Tab word-by-word acceptance (`CompletionController.acceptNextWord`, ADR-016/039) inserts the
+  next word, advances the live caret optimistically, and sets `visibleCandidate` to the remainder —
+  but it did **not** redraw the overlay. The shrunk remainder was re-pinned to the new caret only when
+  the post-insertion focused-field snapshot arrived (`handle` → `renderSuggestion`). That snapshot is
+  driven by AX `kAXValueChangedNotification`/`kAXSelectedTextChangedNotification`, which is near-instant
+  in web fields but lags the keystroke by tens-to-hundreds of ms in many native apps (worst case, only
+  the 0.5 s safety poll). So after accepting a word mid-word at the end of a paragraph, the ghost text
+  visibly stalled at its old position/length until the lagging snapshot (or the next generation) landed
+  — it read as "the ghost text doesn't redraw until the next completion finishes." This is the
+  acceptance-side twin of ADR-037, which already established that the AX-snapshot path is correct but
+  *late* and must be front-run for UI immediacy.
+- Decision: Redraw the remainder synchronously from `acceptNextWord`, without waiting for AX. The prior
+  inline overlay already drew the remainder exactly `head`'s rendered width past the caret, so shifting
+  the overlay by that width and redrawing just the remainder lands it where it already sat on screen
+  (the inserted real text falls under where the ghost `head` was). The geometry lives in `CompletionUI`:
+  `GhostTextOverlayWindow` remembers its last `show` parameters and exposes `advanceAfterAccepting(head:
+  remainder:)`, which measures `head` in the on-screen (already-resolved) font, shifts the caret rect
+  along the writing direction (`advanced(_:byAcceptedWidth:)` — rightward LTR, leftward RTL), and
+  redraws; an empty remainder hides the overlay. It is a no-op for the **capsule** (mid-line) presentation,
+  which the AX path keeps repositioning. `InlineGhostTextPresenter.advanceAfterAccepting` forwards to the
+  window and updates `visibleCandidate`. The controller calls it just before synthesizing the insertion.
+- Consequences:
+  - Mid-word / end-of-paragraph word acceptance shrinks and follows the caret on the same run-loop turn
+    as the Tab, independent of how slowly the target app reports AX changes; the AX snapshot still re-pins
+    precisely a moment later, correcting any sub-pixel width drift. Repeated rapid Tabs accumulate
+    correctly because each advance builds on the last shown placement, and a real snapshot resets it.
+  - No public protocol change: the controller holds the concrete `InlineGhostTextPresenter`, so the new
+    method is additive. The shift math is a pure static function unit-tested in `CompletionUITests`
+    (LTR rightward, RTL leftward).
+  - Capsule/mid-line acceptance is deliberately unchanged (the inline reposition heuristic doesn't apply),
+    so this carries no regression risk for fill-in-the-middle completions.
