@@ -83,6 +83,14 @@ output, and `CaretBoundary.reconcile` strips the leading newline FIM tends to pr
 the app after the on-device `PromptStrategyProbeTests` confirmed it beats the base path on mid-line
 cases.
 
+Three always-on FIM-quality behaviors then refine mid-line output (ADR-057): the raw prefix/suffix
+are **windowed toward the caret** (`fimMaxPrefixTokens`/`fimMaxSuffixTokens`) so a long body stays
+local and within budget; a branch that emits a real middle and then runs into the suffix is
+**truncated at the overlap** and salvaged rather than discarded (only a pure copy is dropped); and the
+surviving mid-line candidates are **reranked by suffix-likelihood** — the mean log-probability of the
+first few real `afterCursor` tokens given `prefix + middle` (a round-trip join score; reorder-only,
+never suppresses).
+
 ## Environment-context policy (ADR-017)
 
 The bracketed scaffolding *helps* small base models on prose, but the app/window/field **metadata**

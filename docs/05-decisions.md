@@ -79,6 +79,8 @@ row here.**
 | 053 | Hide completion latency without changing candidate quality | performance |
 | 054 | Redraw the remaining ghost text eagerly on Tab acceptance | ui |
 | 055 | Drop a word break the model emits after a healed stem | generation |
+| 056 | Mid-word quality: accurate OCR, dead-end + charset guards | generation |
+| 057 | Mid-line FIM quality: truncate-at-overlap, suffix rerank, windowing | generation |
 
 ---
 
@@ -2264,3 +2266,90 @@ text. Both are now closed:
   The fix is localized to `strip` (the one place the healed stem is removed) rather than widening
   `CaretBoundary`'s whitespace rule, which must stay gated for the non-heal path. Covered by new
   `MidWordHealingTests` cases (`" aft ernoon"`/`" gre at"` → no stray space; internal spaces preserved).
+
+## ADR-056 — Mid-word completion quality: accurate OCR, a dead-end-stem net, and a charset guard
+
+- Date: 2026-06-01
+- Status: accepted
+- Context: A user report (and a `predictions.log` review) confirmed that *mid-word* completions are the
+  weakest case across every model, and worse on the larger ones. Two distinct failure shapes recurred:
+  (1) a useless **single letter** continuation that can't begin any English word (e.g. `"th"` → `"x"`),
+  and (2) **random characters** — a stray `$`/`*` glued onto the word, or runs of periods (`"...."`) —
+  which spike sharply when the opt-in screen-OCR context is enabled and feeds garbled text the model
+  then parrots. Existing defences didn't cover them: the current-word typo net (ADR-015/024) only judges
+  a word once it has *closed*, so an open dead-end stem and any junk character that closes the word both
+  slipped through; the OCR corruption filters (ADR-049/050) are per-line lexical heuristics that can't
+  catch every mangled recognition.
+- Decision: three conservative, on-principle ("prefer suppression to a wrong suggestion") changes.
+  - **Accurate OCR at the source.** `ScreenTextOCR.recognizeLines` now uses Vision `.accurate`
+    recognition with language correction *on*. The capture runs out of band (focus/window change + a
+    4 s timer, never on the keystroke path — `ScreenContextController`/`WindowOCRCaptureEngine`), so
+    there is no per-keystroke latency to protect; cutting mangled recognitions at the source is the
+    highest-leverage fix for OCR-induced "random character" completions. The ADR-049/050 corruption
+    filters stay as a backstop.
+  - **Dead-end-stem net.** `DefaultCandidateFilter` gains `currentWordIsDeadEnd`, the mirror of the
+    typo net for the still-*open* case it deliberately skips: if the word the user is completing is left
+    open on a stem that cannot begin any dictionary word, suppress (`SuppressionReason
+    .currentWordHasNoValidCompletion`). It reuses the typo net's exact reconstruction (heal-aware via
+    ADR-019, same `isEligible` rules, same already-used-term exemption) and a new
+    `SynchronousWordRecognizing.canCompleteWord(prefix:language:)` (default `true`; the macOS
+    `SystemWordRecognizer` implements it with `NSSpellChecker.completions(forPartialWordRange:)`,
+    conservative to `true` whenever the checker can't answer). This kills the "useless single letter".
+  - **Mid-word charset guard.** New `MidWordCharsetGuard` drops a prose/correction completion that closes
+    the typed word with a *junk* character (anything that isn't a letter/digit/whitespace or an allowed
+    word-closer like `. , ! ? ; : ' " ) ] - … / %`) or that contains a ≥4-long run of one punctuation
+    mark. Applied **in the beam** (so a clean branch can win instead of the controller suppressing the
+    corrupted best) and re-checked in the filter as the last gate (mapped to `.insertionUnsafe`).
+    A symbol that follows a clean boundary — a brand-new word, e.g. the `$` in `" $5"` — is left alone,
+    so prices/markup in ordinary prose are untouched, and the guard never runs in `.code`/`.terminal`.
+- Consequences: Mid-word now either offers a real word or nothing, and OCR-polluted "random character"
+  completions are caught at the source and again at the word boundary. Trade-offs: a budget-truncated
+  long word whose stem *is* a viable prefix is still shown (the dead-end net only fires on truly
+  impossible stems); the charset junk-closer set is deliberately narrow to avoid false positives, so
+  garbage that starts a fresh word inside a completion is not policed. `swift build`/`swift test` green
+  for AutocompleteCore, ConstrainedGeneration, and MacContextCapture; new `CandidateFilterTests` cover
+  both nets. The `.accurate` OCR cost is unmeasured per-capture but bounded by the off-path 4 s cadence.
+
+## ADR-057 — Mid-line FIM quality: truncate-at-overlap, suffix-likelihood rerank, windowed context
+
+- Date: 2026-06-01
+- Status: accepted
+- Context: A review of mid-line (fill-in-the-middle) completions surfaced three weaknesses left after
+  ADR-017/049/050. (1) On small models, FIM decoding often emits a genuine "middle" and then *runs
+  into the suffix*, regurgitating text already after the caret; `SuffixOverlapGuard` caught these but
+  **discarded the whole branch**, throwing away the usable fill in front of the duplication. (2) Among
+  several plausible middles, nothing scored *how well the real suffix continues* once a middle is
+  inserted — the strongest FIM-specific signal of a good join. (3) The FIM path fed the model the
+  entire raw `beforeCursor`/`afterCursor`, so a long body of text inflated latency and diluted the
+  local join signal. These are mid-line-only; end-of-line (append-at-caret) behaviour was fine.
+- Decision: three changes, all **always on** for mid-line requests (numeric tunables in
+  `DecodingConfiguration`, but no on/off flags), each constructed to only improve or no-op:
+  - **Truncate-at-overlap.** `SuffixOverlapGuard.nonDuplicatingPrefixLength` reports where a completion
+    starts reproducing the suffix (mapping the case-folded-alphanumeric overlap point back to an
+    original-string character count, rounding down). `GenerationBranch.truncatedToText(prefixCharCount:)`
+    rebuilds a branch from only the leading whole tokens that fit, recomputing bytes/score/displayWidth
+    from per-token data now retained on the branch. The engine salvages a duplicating branch to its
+    middle instead of dropping it; a pure suffix copy (or a middle below a 3-grapheme floor, or one that
+    still duplicates after the cut) is dropped — identical to the old "show nothing". `duplicatesSuffix`
+    is refactored to share the new overlap-detection core, so its boolean result is byte-identical.
+  - **Suffix-likelihood rerank.** `ConstrainedGenerationEngine.rerankBySuffixLikelihood` measures, for
+    each surviving mid-line candidate, the mean per-token log-probability of the first
+    `suffixRerankTokenCount` real `afterCursor` tokens conditioned on `prefix + middle` (a round-trip
+    "join" score via `anchoredLogitsBatch` on a per-candidate anchor), and adds
+    `suffixRerankWeight × meanJoinLogProb` to a copy of the branch score before ranking. It is strictly
+    **reorder-only** — it never drops a candidate — and a guaranteed no-op when the runtime returns no
+    logits (every stub/recording runtime), so existing deterministic tests are unaffected. Suppressing
+    catastrophic joins is deliberately out of scope (would risk new false suppressions).
+  - **Windowed FIM context.** `fillInMiddlePrompt` keeps only the prefix *tail* (`fimMaxPrefixTokens`,
+    default 256) and the suffix *head* (`fimMaxSuffixTokens`, default 64) — the bytes nearest the caret.
+    A context already under the cap is fed verbatim, so short fields are unchanged. `SuffixOverlapGuard`
+    still compares against the *full* `afterCursor` (windowing only changes what the model conditions on).
+- Consequences: Mid-line completions now salvage a real fill where they used to vanish, are ordered by
+  how cleanly they let the existing suffix continue, and stay within a bounded, caret-local context on
+  long documents. Defaults (256/64/3/1.0) are starting points to tune from the on-device
+  `PromptStrategyProbeTests` mid-line section (extended to print the truncated, reranked top-2) and
+  `predictions.log`. The rerank adds a few short forward passes per mid-line completion on a per-candidate
+  anchor (no KV reuse with the search anchor); it runs only when there are 2+ mid-line candidates. New
+  tests: `SuffixOverlapGuardTruncationTests` (AutocompleteCore); `GenerationBranchTruncationTests`,
+  `DecodingConfigurationTests`, engine truncation/drop + rerank flip/no-op cases, and FIM windowing cases
+  (ConstrainedGeneration). `swift build` + `swift test -c release` green for both packages (65 and 109).

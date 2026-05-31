@@ -33,7 +33,7 @@ category `context-capture`.
 | --- | --- | --- |
 | `SUPPRESS(noCandidate)` — model produced nothing usable | generation / prompt | `Prompting` budget, required-prefix decode (ADR-025), FIM resolution (ADR-017) |
 | Good candidates but `SUPPRESS(<reason>)` you disagree with | filtering | `DefaultCandidateFilter` + the `SuppressionReason` mapping below |
-| `SHOWN` but the text is wrong/duplicative/chatty | generation quality | beam config, FIM/suffix-overlap (ADR-049), sentence stop (ADR-013) |
+| `SHOWN` but the text is wrong/duplicative/chatty | generation quality | beam config, FIM suffix-overlap truncate + rerank + windowing (ADR-049/057), sentence stop (ADR-013) |
 | `SHOWN` but it renders in the wrong place / unreadable | overlay | `CompletionUI` placement, capsule vs inline (ADR-048) |
 | Accepts but the inserted text is wrong (style/spacing/dupe) | insertion / boundary | `TextInsertion`, `CaretBoundary.reconcile` (ADR-017), Tab units (ADR-038/050) |
 | `ctx="…"` itself looks wrong (bad before/after split) | context capture | `MacContextCapture`, browser focus (ADR-027/033), OCR (ADR-040/049) |
@@ -53,9 +53,10 @@ reads `SUPPRESS(x)`, find `x` here and check whether the gate is firing correctl
 | `requiredPrefixNotSatisfied` | Doesn't extend the current word's required prefix (ADR-025). |
 | `displayWidthExceeded` | Wider than `maxDisplayWidth`. |
 | `maxCompletionLengthExceeded` | Longer than `maxCompletionTokens` allows. |
-| `insertionUnsafe` | Insertion strategy can't safely apply here. |
+| `insertionUnsafe` | Insertion strategy can't safely apply here, or a junk char/punctuation-run corrupts the mid-word completion (`MidWordCharsetGuard`, ADR-056). |
 | `currentWordLooksLikeTypo` | In-beam typo guard closed the word into a misspelling (ADR-015/026). |
-| `duplicatesAfterCursor` | Reproduces text already after the caret — `SuffixOverlapGuard` (ADR-049). |
+| `currentWordHasNoValidCompletion` | The word is left *open* on a stem that can't begin any dictionary word (ADR-056). |
+| `duplicatesAfterCursor` | Reproduces text already after the caret — `SuffixOverlapGuard`. The engine first tries to *truncate* a mid-line branch at the overlap and keep the real middle; this fires only when nothing safe remains (ADR-049/057). |
 | `noCandidate` | Generation returned nothing admissible. |
 
 If a gate is firing when it shouldn't, fix the **policy or guard that set it**, not the call site —

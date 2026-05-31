@@ -42,32 +42,105 @@ public enum SuffixOverlapGuard {
         minimumOverlap: Int = 3,
         minimumContainedOverlap: Int = 8
     ) -> Bool {
+        duplicationStart(
+            completion: completion,
+            beforeCursor: beforeCursor,
+            afterCursor: afterCursor,
+            minimumOverlap: minimumOverlap,
+            minimumContainedOverlap: minimumContainedOverlap
+        ) != nil
+    }
+
+    /// Number of leading **characters of the original `completion`** to keep so that the kept text
+    /// stops right where the completion begins reproducing `afterCursor`. Used to *salvage* a
+    /// mid-line / FIM branch by truncating it at the suffix-overlap point instead of discarding it
+    /// (see ADR-057). Return values:
+    ///
+    /// - `nil`  — no overlap; keep the whole completion (caller does not truncate).
+    /// - `0`    — the completion is a suffix copy from the very start; nothing to keep (drop it).
+    /// - `n > 0` — keep the first `n` characters (the genuine "middle"), drop the duplicating tail.
+    ///
+    /// The overlap is detected on case-folded alphanumerics (same as `duplicatesSuffix`); the
+    /// alphanumeric offset is then mapped back to a whole-character count of the *original* string,
+    /// rounding **down** so a truncation can never include part of the duplicated suffix.
+    public static func nonDuplicatingPrefixLength(
+        completion: String,
+        beforeCursor: String,
+        afterCursor: String,
+        minimumOverlap: Int = 3,
+        minimumContainedOverlap: Int = 8
+    ) -> Int? {
+        guard let normalizedStart = duplicationStart(
+            completion: completion,
+            beforeCursor: beforeCursor,
+            afterCursor: afterCursor,
+            minimumOverlap: minimumOverlap,
+            minimumContainedOverlap: minimumContainedOverlap
+        ) else { return nil }
+        return originalPrefixCharacterCount(of: completion, keepingFirstAlphanumerics: normalizedStart)
+    }
+
+    // MARK: - Overlap detection (shared by both public entry points)
+
+    /// The index, in **normalized-alphanumeric space**, at which `completion` starts reproducing
+    /// `afterCursor`, or `nil` when there is no qualifying overlap. The three duplication shapes and
+    /// their guards exactly mirror the original `duplicatesSuffix` logic, so its boolean result is
+    /// unchanged; this just additionally surfaces *where* the duplication begins.
+    static func duplicationStart(
+        completion: String,
+        beforeCursor: String,
+        afterCursor: String,
+        minimumOverlap: Int,
+        minimumContainedOverlap: Int
+    ) -> Int? {
         let normalizedCompletion = normalizedAlphanumerics(completion)
         let normalizedSuffix = normalizedAlphanumerics(afterCursor)
         guard normalizedCompletion.count >= minimumOverlap, !normalizedSuffix.isEmpty else {
-            return false
+            return nil
         }
 
-        // 1. Boundary-aligned duplication.
-        if normalizedSuffix.hasPrefix(normalizedCompletion) { return true }
+        // 1. Boundary-aligned duplication: the whole completion copies the head of the suffix.
+        if normalizedSuffix.hasPrefix(normalizedCompletion) { return 0 }
 
         // 2. Suffix-contained duplication: the completion already includes the entire upcoming
         //    suffix, so inserting it would re-type text the user already has. Requires a substantial
-        //    suffix so a short common run can't trip it.
-        if normalizedSuffix.count >= minimumContainedOverlap, normalizedCompletion.contains(normalizedSuffix) {
-            return true
+        //    suffix so a short common run can't trip it. The duplication begins where the suffix
+        //    first appears inside the completion — everything before that is the genuine middle.
+        if normalizedSuffix.count >= minimumContainedOverlap,
+           let range = normalizedCompletion.range(of: normalizedSuffix) {
+            return normalizedCompletion.distance(from: normalizedCompletion.startIndex, to: range.lowerBound)
         }
 
         // 3. Mid-word duplication. Only when the caret sits inside a word (the char before the caret
-        //    and the char after it are both word characters) and the completion is substantial.
-        guard endsInWordCharacter(beforeCursor), normalizedCompletion.count >= 6 else { return false }
+        //    and the char after it are both word characters) and the completion is substantial. Here
+        //    the completion lies wholly within the suffix, so the entire thing is a copy.
+        guard endsInWordCharacter(beforeCursor), normalizedCompletion.count >= 6 else { return nil }
         let straddleRemainder = normalizedAlphanumerics(leadingWordRun(afterCursor))
-        guard !straddleRemainder.isEmpty else { return false }
+        guard !straddleRemainder.isEmpty else { return nil }
         if let range = normalizedSuffix.range(of: normalizedCompletion) {
             let offset = normalizedSuffix.distance(from: normalizedSuffix.startIndex, to: range.lowerBound)
-            return offset <= straddleRemainder.count
+            return offset <= straddleRemainder.count ? 0 : nil
         }
-        return false
+        return nil
+    }
+
+    /// Largest number of leading whole characters of `text` whose case-folded alphanumeric scalars
+    /// number at most `count`. Mirrors `normalizedAlphanumerics` (lowercase first, count alphanumeric
+    /// scalars) so the mapping from normalized-alphanumeric index back to original characters is
+    /// exact, and rounds down at character boundaries.
+    static func originalPrefixCharacterCount(of text: String, keepingFirstAlphanumerics count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        var alphanumericSeen = 0
+        var kept = 0
+        for character in text {
+            let contribution = character.lowercased().unicodeScalars.reduce(0) { partial, scalar in
+                partial + (CharacterSet.alphanumerics.contains(scalar) ? 1 : 0)
+            }
+            if alphanumericSeen + contribution > count { break }
+            alphanumericSeen += contribution
+            kept += 1
+        }
+        return kept
     }
 
     // MARK: - Helpers

@@ -161,19 +161,50 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
             finalizeIfValid(branch, into: &finalized)
         }
 
-        // Drop mid-line / FIM branches that merely reproduce the text already after the caret —
-        // accepting one would duplicate the user's own suffix. Cheap to do on the finalised set, and
-        // it lets a non-duplicative lower-ranked branch surface instead of the suffix copy. The
-        // `DefaultCandidateFilter` re-checks this as the documented last gate. See ADR-049.
-        let surviving = finalized.filter {
-            !SuffixOverlapGuard.duplicatesSuffix(
-                completion: $0.text,
-                beforeCursor: request.context.beforeCursor,
-                afterCursor: request.context.afterCursor
-            )
+        // Mid-line / FIM branches that reproduce the text already after the caret are no longer just
+        // discarded: a branch that emits a genuine "middle" and *then* runs into the suffix is
+        // salvaged by truncating it at the overlap point, so the real fill survives instead of the
+        // whole branch being thrown away. A branch that is a suffix copy from the very start (or whose
+        // salvaged middle is too short / still duplicative) is dropped — identical to the old
+        // behaviour: show nothing. The `DefaultCandidateFilter` re-checks duplication as the
+        // documented last gate. See ADR-049 / ADR-057.
+        let surviving = finalized.compactMap { branch in
+            salvagedBranch(branch, request: request)
         }
 
-        return makeCandidates(from: surviving, mode: request.mode)
+        // Reorder by how naturally the real suffix continues after each candidate's middle (a
+        // round-trip "join" score). Reorder-only: it never drops a candidate, and it is a no-op when
+        // the runtime returns no logits (every stub-backed test). See ADR-057.
+        let reranked = try await rerankBySuffixLikelihood(surviving, request: request)
+
+        return makeCandidates(from: reranked, mode: request.mode)
+    }
+
+    /// Minimum grapheme length a salvaged (truncated) middle must have to be worth showing. Mirrors
+    /// `SuffixOverlapGuard`'s `minimumOverlap` so a 1-2 character fragment left in front of the
+    /// duplicated suffix is dropped rather than inserted.
+    private static let minimumSalvagedMiddleLength = 3
+
+    /// Returns `branch` unchanged when it does not duplicate the suffix; the truncated "middle" when
+    /// the branch runs into the suffix but emitted a substantial fill first; or `nil` when there is
+    /// nothing safe to keep (drop it — show nothing).
+    private func salvagedBranch(_ branch: GenerationBranch, request: CompletionRequest) -> GenerationBranch? {
+        guard let keepCharacters = SuffixOverlapGuard.nonDuplicatingPrefixLength(
+            completion: branch.text,
+            beforeCursor: request.context.beforeCursor,
+            afterCursor: request.context.afterCursor
+        ) else {
+            return branch // no overlap — keep as is
+        }
+        let truncated = branch.truncatedToText(prefixCharCount: keepCharacters)
+        guard truncated.text.count >= Self.minimumSalvagedMiddleLength,
+              !SuffixOverlapGuard.duplicatesSuffix(
+                  completion: truncated.text,
+                  beforeCursor: request.context.beforeCursor,
+                  afterCursor: request.context.afterCursor
+              )
+        else { return nil }
+        return truncated
     }
 
     /// Pre-decodes the fixed request anchor without expanding any candidate branches. This warms
@@ -225,9 +256,24 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
         guard pre.count == 1, suf.count == 1, mid.count == 1 else { return nil }
 
         let prefixText = Self.trimmingTrailingWhitespace(request.context.beforeCursor)
-        let prefix = try tokenizer.tokenize(prefixText)
-        let suffix = try tokenizer.tokenize(request.context.afterCursor)
+        // Window the context toward the caret so a long body of text neither blows the latency budget
+        // nor dilutes the local join signal: keep the prefix *tail* and the suffix *head* (the bytes
+        // nearest the caret). A context already under the cap is fed verbatim. See ADR-057.
+        let prefix = Self.keepingLast(configuration.fimMaxPrefixTokens, of: try tokenizer.tokenize(prefixText))
+        let suffix = Self.keepingFirst(configuration.fimMaxSuffixTokens, of: try tokenizer.tokenize(request.context.afterCursor))
         return (pre + prefix + suf + suffix + mid, String(prefixText.suffix(32)))
+    }
+
+    /// Keep at most the last `limit` tokens (the tail nearest the caret); `limit <= 0` keeps all.
+    static func keepingLast(_ limit: Int, of tokens: [TokenID]) -> [TokenID] {
+        guard limit > 0, tokens.count > limit else { return tokens }
+        return Array(tokens.suffix(limit))
+    }
+
+    /// Keep at most the first `limit` tokens (the head nearest the caret); `limit <= 0` keeps all.
+    static func keepingFirst(_ limit: Int, of tokens: [TokenID]) -> [TokenID] {
+        guard limit > 0, tokens.count > limit else { return tokens }
+        return Array(tokens.prefix(limit))
     }
 
     static func trimmingTrailingWhitespace(_ text: String) -> String {
@@ -298,6 +344,91 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
         else { return false }
 
         return locked[candidateLimit - 1].score > bestLiveScore
+    }
+
+    // MARK: - Suffix-likelihood rerank (round-trip join score, ADR-057)
+
+    /// Reorders mid-line candidates by how natural the *real* suffix is once each candidate's middle
+    /// is inserted: a clean fill makes the upcoming `afterCursor` tokens cheap; a derailing one makes
+    /// them expensive. Adds the mean per-token join log-probability (weighted) to a copy of each
+    /// branch's score so `makeCandidates` ranks by it.
+    ///
+    /// Strictly reorder-only — it never drops a candidate — and a guaranteed no-op when the runtime
+    /// returns no logits (stub/recording runtimes), so existing deterministic tests are unaffected.
+    private func rerankBySuffixLikelihood(
+        _ branches: [GenerationBranch],
+        request: CompletionRequest
+    ) async throws -> [GenerationBranch] {
+        guard configuration.suffixRerankTokenCount > 0,
+              !request.context.afterCursor.isEmpty,
+              branches.count > 1
+        else { return branches }
+
+        let suffixTokens = Array(
+            ((try? runtime.tokenizer.tokenize(request.context.afterCursor)) ?? [])
+                .prefix(configuration.suffixRerankTokenCount)
+        )
+        guard !suffixTokens.isEmpty else { return branches }
+
+        let trimmedPrefix = Self.trimmingTrailingWhitespace(request.context.beforeCursor)
+
+        var result: [GenerationBranch] = []
+        result.reserveCapacity(branches.count)
+        for branch in branches {
+            try Task.checkCancellation()
+            var copy = branch
+            copy.score = try await suffixJoinAdjustedScore(
+                branch: branch,
+                trimmedPrefix: trimmedPrefix,
+                suffixTokens: suffixTokens
+            )
+            result.append(copy)
+        }
+        return result
+    }
+
+    /// The branch's score plus `suffixRerankWeight × meanJoinLogProb`, or the unchanged score when the
+    /// join cannot be measured (no anchor tokens, mismatched frontier, or no usable logits).
+    private func suffixJoinAdjustedScore(
+        branch: GenerationBranch,
+        trimmedPrefix: String,
+        suffixTokens: [TokenID]
+    ) async throws -> Float {
+        guard let joinAnchor = try? runtime.tokenizer.tokenize(trimmedPrefix + branch.text),
+              !joinAnchor.isEmpty
+        else { return branch.score }
+
+        // Probe each leading suffix token conditioned on prefix + middle + the earlier suffix tokens.
+        let probeSuffixes: [[TokenID]] = (0..<suffixTokens.count).map { Array(suffixTokens.prefix($0)) }
+        let frontier = try await runtime.anchoredLogitsBatch(anchor: joinAnchor, suffixes: probeSuffixes)
+        guard frontier.count == suffixTokens.count else { return branch.score }
+
+        var total: Float = 0
+        var counted = 0
+        for (index, logits) in frontier.enumerated() {
+            guard let logProbability = Self.logProbability(of: suffixTokens[index], in: logits) else { continue }
+            total += logProbability
+            counted += 1
+        }
+        guard counted > 0 else { return branch.score }
+        return branch.score + configuration.suffixRerankWeight * (total / Float(counted))
+    }
+
+    /// Exact log-softmax probability of `token` from a full-vocabulary logits vector, or `nil` when
+    /// the vector is empty or does not contain `token` (so the caller can treat it as "unmeasured").
+    static func logProbability(of token: TokenID, in logits: [TokenLogit]) -> Float? {
+        guard !logits.isEmpty else { return nil }
+        var maxLogit = -Float.greatestFiniteMagnitude
+        var targetLogit: Float?
+        for entry in logits {
+            if entry.logit > maxLogit { maxLogit = entry.logit }
+            if entry.tokenID == token { targetLogit = entry.logit }
+        }
+        guard let target = targetLogit else { return nil }
+        var sumExp: Float = 0
+        for entry in logits { sumExp += expf(entry.logit - maxLogit) }
+        guard sumExp > 0 else { return nil }
+        return target - (maxLogit + logf(sumExp))
     }
 
     /// Dedupe by emitted text (best score wins), rank, and cap to `maxCandidates`.

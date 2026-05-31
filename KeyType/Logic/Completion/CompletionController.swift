@@ -815,6 +815,9 @@ final class CompletionController {
             // Native fill-in-the-middle for mid-line completion (the on-device probe confirmed it
             // beats base continuation, which collides with the after-cursor text). Falls back to
             // base continuation when there is no suffix or the model lacks FIM tokens. See ADR-017.
+            // The FIM-quality behaviors (caret-ward context windowing, suffix-overlap truncation, and
+            // suffix-likelihood rerank) are always on and use the DecodingConfiguration defaults for
+            // their window sizes / rerank depth+weight. See ADR-057.
             enableFillInMiddle: true
         )
         return ConstrainedGenerationEngine(

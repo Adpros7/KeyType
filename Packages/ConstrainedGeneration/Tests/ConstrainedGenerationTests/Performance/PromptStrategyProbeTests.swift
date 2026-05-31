@@ -121,19 +121,31 @@ final class PromptStrategyProbeTests: XCTestCase {
             ("def add(a, b):\n    return ", "\n", "a + b")
         ]
         print("\n---- MID-LINE (fill) : base engine vs native FIM (greedy + engine) ----")
+        print("(FIM engine path now always applies: context windowing + suffix-overlap truncation + suffix-likelihood rerank — ADR-057)")
         for (before, after, want) in midLine {
             let prodPrompt = productionPrompt(before: before, after: after)
             let prodEngine = try await engineTop(engine, prompt: prodPrompt, before: before, after: after, maxNew: maxNew)
             let fimTokens = fimPre + (try llamaTok.tokenize(before)) + fimSuf + (try llamaTok.tokenize(after)) + fimMid
             let fimGreedy = try await greedy(runtime, tokens: fimTokens, maxNew: maxNew)
-            // End-to-end: FIM-enabled engine (assembles FIM internally from context) + reconcile.
-            let fimEngineRaw = try await engineTop(fimEngine, prompt: prodPrompt, before: before, after: after, maxNew: maxNew)
-            let fimEngineOut = CaretBoundary.reconcile(fimEngineRaw, beforeCursor: before)
+            // End-to-end: FIM-enabled engine (assembles FIM internally from context, truncates any
+            // suffix overlap, and reranks by suffix-join likelihood) + reconcile. Print the top two
+            // candidates so the rerank's ordering is visible.
+            let fimRequest = CompletionRequest(
+                context: TextFieldContext(beforeCursor: before, afterCursor: after, target: target, detectedLanguage: "en"),
+                prompt: prodPrompt,
+                mode: .prose,
+                maxCompletionTokens: maxNew,
+                maxDisplayWidth: 60
+            )
+            let fimCandidates = try await fimEngine.completions(for: fimRequest)
+            let fimRanked = fimCandidates.prefix(2).map { candidate -> String in
+                disp(CaretBoundary.reconcile(candidate.text, beforeCursor: before))
+            }
 
             print("\nBEFORE: \(disp(before))   AFTER: \(disp(after))   (want ≈ \(disp(want)))")
-            print("  (A) base engine (collides w/ suffix): \(disp(prodEngine))")
-            print("  (C) native FIM → greedy             : \(disp(fimGreedy))")
-            print("  (C) native FIM → engine+reconcile   : \(disp(fimEngineOut))")
+            print("  (A) base engine (collides w/ suffix)   : \(disp(prodEngine))")
+            print("  (C) native FIM → greedy                : \(disp(fimGreedy))")
+            print("  (C) native FIM → engine (top-2, reconciled): \(fimRanked.isEmpty ? "(suppressed)" : fimRanked.joined(separator: ", "))")
         }
         print("\n===============================================================\n")
     }

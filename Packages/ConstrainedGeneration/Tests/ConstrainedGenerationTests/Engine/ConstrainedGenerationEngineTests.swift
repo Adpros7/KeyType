@@ -686,4 +686,102 @@ final class ConstrainedGenerationEngineTests: XCTestCase {
         let fixed = try await guarded.completions(for: healedRequest)
         XCTAssertEqual(fixed.map(\.text), [" collaboration "], "healed nonsense dropped, real word kept")
     }
+
+    // MARK: - Suffix-overlap truncation (ADR-057)
+
+    /// A branch that emits a genuine middle and then runs into the suffix is salvaged: the engine
+    /// truncates it at the overlap point and returns the real fill instead of discarding it.
+    func testSuffixOverlapBranchIsTruncatedToTheMiddle() async throws {
+        let profileRecords = profile([
+            record(1, "Paris "), record(11, "the largest "), record(12, "city")
+        ])
+        let runtime = runtime([
+            []: [logit(1, 1.0)],
+            [1]: [logit(11, 1.0)],
+            [1, 11]: [logit(12, 1.0)]
+        ])
+        let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profileRecords)
+
+        // Field: "The capital of |the largest city". The model regurgitates the suffix after "Paris ".
+        let candidates = try await engine.completions(for: CompletionRequest(
+            context: TextFieldContext(beforeCursor: "The capital of ", afterCursor: "the largest city", target: Self.testTarget),
+            prompt: "",
+            mode: .prose,
+            maxCompletionTokens: 3,
+            maxDisplayWidth: 80
+        ))
+
+        XCTAssertEqual(candidates.map(\.text), ["Paris "], "the duplicating tail is cut, the middle survives")
+    }
+
+    /// A branch that is a suffix copy from the very first token has no salvageable middle and is
+    /// dropped entirely — the engine shows nothing (the pre-ADR-057 outcome for this shape).
+    func testWholeSuffixCopyIsDropped() async throws {
+        let profileRecords = profile([
+            record(1, "the "), record(2, "largest "), record(3, "city")
+        ])
+        let runtime = runtime([
+            []: [logit(1, 1.0)],
+            [1]: [logit(2, 1.0)],
+            [1, 2]: [logit(3, 1.0)]
+        ])
+        let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profileRecords)
+
+        let candidates = try await engine.completions(for: CompletionRequest(
+            context: TextFieldContext(beforeCursor: "The capital of ", afterCursor: "the largest city", target: Self.testTarget),
+            prompt: "",
+            mode: .prose,
+            maxCompletionTokens: 3,
+            maxDisplayWidth: 80
+        ))
+
+        XCTAssertTrue(candidates.isEmpty, "a pure suffix copy is suppressed")
+    }
+
+    // MARK: - Suffix-likelihood rerank (ADR-057)
+
+    /// Two non-duplicating mid-line candidates: the base-score order is [A, B], but B's middle makes
+    /// the real suffix far more likely, so the round-trip rerank flips the order to [B, A].
+    func testSuffixLikelihoodRerankReordersByJoinQuality() async throws {
+        let profileRecords = profile([record(65, "A"), record(66, "B")])
+        let runtime = runtime([
+            []: [logit(65, 1.0), logit(66, 0.9)],     // base order: A above B
+            [65]: [logit(90, -5.0), logit(91, 0.0)],  // after "A": the suffix token 'Z' is unlikely
+            [66]: [logit(90, 0.0)]                     // after "B": the suffix token 'Z' is likely
+        ])
+        let config = DecodingConfiguration(maxCandidates: 5, suffixRerankTokenCount: 1, suffixRerankWeight: 1.0)
+        let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profileRecords, configuration: config)
+
+        let candidates = try await engine.completions(for: CompletionRequest(
+            context: TextFieldContext(beforeCursor: "", afterCursor: "Z", target: Self.testTarget),
+            prompt: "",
+            mode: .prose,
+            maxCompletionTokens: 1,
+            maxDisplayWidth: 80
+        ))
+
+        XCTAssertEqual(candidates.map(\.text), ["B", "A"], "the better join wins despite the lower base score")
+    }
+
+    /// The rerank is a strict no-op when the runtime returns no join logits (the property that keeps
+    /// every stub-backed test stable): the base-score order [A, B] is preserved unchanged.
+    func testSuffixLikelihoodRerankIsNoOpWithoutJoinLogits() async throws {
+        let profileRecords = profile([record(65, "A"), record(66, "B")])
+        // No paths scripted for [65] / [66], so the join probe returns empty logits.
+        let runtime = runtime([
+            []: [logit(65, 1.0), logit(66, 0.9)]
+        ])
+        let config = DecodingConfiguration(maxCandidates: 5, suffixRerankTokenCount: 1, suffixRerankWeight: 1.0)
+        let engine = ConstrainedGenerationEngine(runtime: runtime, profile: profileRecords, configuration: config)
+
+        let candidates = try await engine.completions(for: CompletionRequest(
+            context: TextFieldContext(beforeCursor: "", afterCursor: "Z", target: Self.testTarget),
+            prompt: "",
+            mode: .prose,
+            maxCompletionTokens: 1,
+            maxDisplayWidth: 80
+        ))
+
+        XCTAssertEqual(candidates.map(\.text), ["A", "B"], "no join logits → order unchanged")
+    }
 }

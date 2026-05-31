@@ -31,6 +31,23 @@ public struct DecodingConfiguration: Equatable {
     /// a model whose vocab has single-token FIM markers; otherwise the engine falls back to base
     /// continuation. See ADR-017.
     public var enableFillInMiddle: Bool
+    /// Caret-ward window applied to the fill-in-the-middle *prefix*: only the last
+    /// `fimMaxPrefixTokens` tokens (the text nearest the caret) are fed to the model. A long body of
+    /// text otherwise blows the latency budget and dilutes the local join signal. `<= 0` disables
+    /// the cap; the always-applied default is a large-but-finite window. See ADR-057.
+    public var fimMaxPrefixTokens: Int
+    /// Caret-ward window applied to the fill-in-the-middle *suffix*: only the first
+    /// `fimMaxSuffixTokens` tokens (the text nearest the caret) are fed to the model. The suffix only
+    /// needs enough to anchor the join. `<= 0` disables the cap. See ADR-057.
+    public var fimMaxSuffixTokens: Int
+    /// How many leading `afterCursor` tokens the suffix-likelihood rerank scores. The rerank measures
+    /// how natural the real suffix is once a candidate's middle is inserted (a round-trip join
+    /// score) and reorders candidates accordingly — it never suppresses. `<= 0` disables the rerank.
+    /// See ADR-057.
+    public var suffixRerankTokenCount: Int
+    /// Weight of the mean per-token suffix-join log-probability added to a branch's cumulative score
+    /// before final ranking. See ADR-057.
+    public var suffixRerankWeight: Float
 
     public init(
         topK: Int = 64,
@@ -40,7 +57,11 @@ public struct DecodingConfiguration: Equatable {
         relativeCutoff: Float = 6,
         minBranchProbability: Float = 0.02,
         maxCandidates: Int = 5,
-        enableFillInMiddle: Bool = false
+        enableFillInMiddle: Bool = false,
+        fimMaxPrefixTokens: Int = 256,
+        fimMaxSuffixTokens: Int = 64,
+        suffixRerankTokenCount: Int = 3,
+        suffixRerankWeight: Float = 1.0
     ) {
         self.topK = topK
         self.topP = topP
@@ -50,5 +71,9 @@ public struct DecodingConfiguration: Equatable {
         self.minBranchProbability = minBranchProbability
         self.maxCandidates = maxCandidates
         self.enableFillInMiddle = enableFillInMiddle
+        self.fimMaxPrefixTokens = fimMaxPrefixTokens
+        self.fimMaxSuffixTokens = fimMaxSuffixTokens
+        self.suffixRerankTokenCount = suffixRerankTokenCount
+        self.suffixRerankWeight = suffixRerankWeight
     }
 }

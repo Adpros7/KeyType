@@ -64,13 +64,20 @@ final class FillInMiddleAssemblyTests: XCTestCase {
         beforeCursor: String,
         afterCursor: String,
         prompt: String = "SCAFFOLD",
-        enableFIM: Bool
+        enableFIM: Bool,
+        fimMaxPrefixTokens: Int = 256,
+        fimMaxSuffixTokens: Int = 64
     ) async throws -> [TokenID] {
         let runtime = RecordingRuntime(tokenizer: tokenizer)
         let engine = ConstrainedGenerationEngine(
             runtime: runtime,
             profile: InMemoryAutocompleteProfile(vocabularySize: 70_000, records: []),
-            configuration: DecodingConfiguration(maxCandidates: 5, enableFillInMiddle: enableFIM)
+            configuration: DecodingConfiguration(
+                maxCandidates: 5,
+                enableFillInMiddle: enableFIM,
+                fimMaxPrefixTokens: fimMaxPrefixTokens,
+                fimMaxSuffixTokens: fimMaxSuffixTokens
+            )
         )
         _ = try await engine.completions(for: CompletionRequest(
             context: TextFieldContext(beforeCursor: beforeCursor, afterCursor: afterCursor, target: Self.target),
@@ -113,6 +120,38 @@ final class FillInMiddleAssemblyTests: XCTestCase {
             enableFIM: true
         )
         XCTAssertEqual(tokens, Array("SCAFFOLD".utf8).map { TokenID($0) })
+    }
+
+    func testWindowsPrefixTailAndSuffixHeadWhenContextExceedsCap() async throws {
+        // FIMStubTokenizer maps each UTF-8 byte to a token id. Prefix "abcdef" → keep the last 2
+        // tokens (tail nearest the caret); suffix "xyz" → keep the first 2 (head nearest the caret).
+        let tokens = try await prepared(
+            tokenizer: FIMStubTokenizer(),
+            beforeCursor: "abcdef",   // [97,98,99,100,101,102] → tail 2 → [101,102]
+            afterCursor: "xyz",       // [120,121,122] → head 2 → [120,121]
+            enableFIM: true,
+            fimMaxPrefixTokens: 2,
+            fimMaxSuffixTokens: 2
+        )
+        XCTAssertEqual(
+            tokens,
+            [FIMStubTokenizer.pre, 101, 102, FIMStubTokenizer.suf, 120, 121, FIMStubTokenizer.mid]
+        )
+    }
+
+    func testContextUnderTheWindowIsFedVerbatim() async throws {
+        // The default window (256/64) is far larger than this context, so the assembly is unchanged
+        // from the un-windowed behaviour — the property that keeps existing FIM assertions valid.
+        let tokens = try await prepared(
+            tokenizer: FIMStubTokenizer(),
+            beforeCursor: "ab ",
+            afterCursor: "cd",
+            enableFIM: true
+        )
+        XCTAssertEqual(
+            tokens,
+            [FIMStubTokenizer.pre, 97, 98, FIMStubTokenizer.suf, 99, 100, FIMStubTokenizer.mid]
+        )
     }
 
     func testFallsBackWhenModelLacksSingleTokenMarkers() async throws {

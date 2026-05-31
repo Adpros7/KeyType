@@ -309,7 +309,7 @@ final class CandidateFilterTests: XCTestCase {
         // User typed "th"; the model leaves the word open as "thx" — no English word starts "thx".
         let filter = DefaultCandidateFilter(wordRecognizer: PrefixRecognizer(viablePrefixes: ["thr"]))
         XCTAssertEqual(
-            filter.suppressionReason(for: candidate("x"), request: request(beforeCursor: "see you wi th".replacingOccurrences(of: " th", with: "th"))),
+            filter.suppressionReason(for: candidate("x"), request: request(beforeCursor: "go th")),
             .currentWordHasNoValidCompletion
         )
     }

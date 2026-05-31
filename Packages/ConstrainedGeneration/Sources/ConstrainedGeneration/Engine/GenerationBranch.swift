@@ -10,6 +10,13 @@ struct GenerationBranch: Equatable {
     var tokenIDs: [TokenID]
     /// Raw bytes for every emitted token, concatenated in order.
     var bytes: [UInt8]
+    /// Byte count contributed by each emitted token, parallel to `tokenIDs`. Lets a finalized branch
+    /// be re-walked token-by-token (e.g. truncate at a character boundary) without re-deriving the
+    /// per-token split from a byte resolver. See `truncatedToText(prefixCharCount:)`.
+    var tokenByteLengths: [Int]
+    /// Per-token log-probability, parallel to `tokenIDs`. Sums to `score`; kept so a truncated
+    /// branch can recompute its score from exactly the tokens it retains.
+    var tokenLogProbabilities: [Float]
     /// Decoded text = the maximal valid-UTF-8 prefix of `bytes`.
     var text: String
     /// Cumulative display width, measured as grapheme clusters of the decoded `text`.
@@ -22,6 +29,8 @@ struct GenerationBranch: Equatable {
     init(requiredPrefix: [UInt8] = []) {
         self.tokenIDs = []
         self.bytes = []
+        self.tokenByteLengths = []
+        self.tokenLogProbabilities = []
         self.text = ""
         self.displayWidth = 0
         self.score = 0
@@ -73,6 +82,8 @@ struct GenerationBranch: Equatable {
             }
             var next = self
             next.tokenIDs.append(tokenID)
+            next.tokenByteLengths.append(tokenBytes.count)
+            next.tokenLogProbabilities.append(logProbability)
             next.bytes = newBytes
             next.text = newText
             next.displayWidth = newWidth
@@ -97,6 +108,47 @@ struct GenerationBranch: Equatable {
         case .invalid:
             return false
         }
+    }
+
+    /// A copy of this branch keeping only the leading whole tokens whose decoded text stays within
+    /// `prefixCharCount` grapheme clusters. Used to salvage a mid-line / FIM branch by cutting it at
+    /// the suffix-overlap point (see `SuffixOverlapGuard.nonDuplicatingPrefixLength` and ADR-057)
+    /// rather than discarding it. Token boundaries that don't align with the character boundary are
+    /// rounded **down** (never keep a token that would reach into the duplicated suffix), and the
+    /// score/displayWidth are recomputed from exactly the retained tokens.
+    func truncatedToText(prefixCharCount: Int) -> GenerationBranch {
+        if prefixCharCount <= 0 {
+            return GenerationBranch() // empty text → caller treats as "nothing to insert"
+        }
+        if text.count <= prefixCharCount {
+            return self
+        }
+
+        let keptByteCount = String(text.prefix(prefixCharCount)).utf8.count
+        var cumulativeBytes = 0
+        var keptTokenCount = 0
+        while keptTokenCount < tokenByteLengths.count,
+              cumulativeBytes + tokenByteLengths[keptTokenCount] <= keptByteCount {
+            cumulativeBytes += tokenByteLengths[keptTokenCount]
+            keptTokenCount += 1
+        }
+
+        var result = GenerationBranch()
+        result.tokenIDs = Array(tokenIDs.prefix(keptTokenCount))
+        result.tokenByteLengths = Array(tokenByteLengths.prefix(keptTokenCount))
+        result.tokenLogProbabilities = Array(tokenLogProbabilities.prefix(keptTokenCount))
+        result.bytes = Array(bytes.prefix(cumulativeBytes))
+        result.score = result.tokenLogProbabilities.reduce(0, +)
+        // A token-aligned prefix of valid bytes may still split a byte-fallback multi-byte character;
+        // keep only the maximal valid-UTF-8 prefix, exactly as `extending` does.
+        switch UTF8Scanner.scan(result.bytes) {
+        case let .valid(validByteCount), let .pending(validByteCount):
+            result.text = String(decoding: result.bytes[0..<validByteCount], as: UTF8.self)
+        case .invalid:
+            result.text = ""
+        }
+        result.displayWidth = result.text.count
+        return result
     }
 
     /// Returns the remaining required prefix after consuming `tokenBytes`, or `nil` if the
