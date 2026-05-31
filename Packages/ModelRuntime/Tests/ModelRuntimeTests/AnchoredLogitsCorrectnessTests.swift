@@ -21,12 +21,11 @@ final class AnchoredLogitsCorrectnessTests: XCTestCase {
         )
     }
 
-    /// Ground truth: clear + full decode of `anchor + suffix`, top-k token ids by logit.
-    private func groundTruthTopK(_ runtime: LlamaModelRuntime, anchor: [TokenID], suffix: [TokenID], k: Int) async throws -> [TokenID] {
+    /// Ground truth: clear + full decode of `anchor + suffix`, returning the raw next-token logits.
+    private func groundTruthLogits(_ runtime: LlamaModelRuntime, anchor: [TokenID], suffix: [TokenID]) async throws -> [TokenLogit] {
         await runtime.resetKVCache()
         try await runtime.prepare(promptTokens: anchor + suffix)
-        let logits = try await runtime.logitsForNextToken()
-        return topK(logits, k)
+        return try await runtime.logitsForNextToken()
     }
 
     private func topK(_ logits: [TokenLogit], _ k: Int) -> [TokenID] {
@@ -35,6 +34,21 @@ final class AnchoredLogitsCorrectnessTests: XCTestCase {
 
     private func argmax(_ logits: [TokenLogit]) -> TokenID? {
         logits.max { $0.logit < $1.logit }?.tokenID
+    }
+
+    /// The project's documented correctness envelope for KV-reuse / batched decode on this hybrid
+    /// recurrent model (ADR-012/018/043): the **argmax is identical** and the **top-k set is
+    /// identical**. Only the order of near-tied tokens at ranks 3+ may shuffle (≤~0.12 logit drift
+    /// from the parallel/split recurrent path), which never changes the displayed (top) candidate.
+    private func assertSameDistribution(
+        _ got: [TokenLogit], _ expected: [TokenLogit], k: Int = 5,
+        _ message: String, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertEqual(argmax(got), argmax(expected), "argmax diverged: \(message)", file: file, line: line)
+        XCTAssertEqual(
+            Set(topK(got, k)), Set(topK(expected, k)),
+            "top-\(k) set diverged: \(message)", file: file, line: line
+        )
     }
 
     func testForkedLogitsMatchFullDecode() async throws {
@@ -54,14 +68,11 @@ final class AnchoredLogitsCorrectnessTests: XCTestCase {
             // Ground truth uses a *separate* runtime so it can't accidentally benefit from resident
             // state left by the fork path.
             let truthRuntime = try makeRuntime(enableKVFork: true)
-            let expected = try await groundTruthTopK(truthRuntime, anchor: anchor, suffix: suffix, k: 5)
-
+            let expected = try await groundTruthLogits(truthRuntime, anchor: anchor, suffix: suffix)
             let forked = try await runtime.anchoredLogits(anchor: anchor, suffix: suffix)
-            let got = topK(forked, 5)
-
-            XCTAssertEqual(
-                got, expected,
-                "forked top-5 diverged from full decode for suffix \(suffix). If this fails, seq_cp is unsafe on this model — switch anchoredLogits to llama_state_seq_get/set_data."
+            assertSameDistribution(
+                forked, expected,
+                "forked snapshot/restore vs full decode for suffix \(suffix)"
             )
         }
     }
@@ -93,6 +104,63 @@ final class AnchoredLogitsCorrectnessTests: XCTestCase {
         XCTAssertEqual(afterGrowth, typed.count, "only the typed delta should be decoded")
     }
 
+    /// Gates the batched beam-frontier expansion (ADR-043): `anchoredLogitsBatch` must produce the
+    /// SAME next-token distribution for each branch as scoring that branch on its own with
+    /// `anchoredLogits`. If multi-sequence seeding or batched decode diverged on this model's hybrid
+    /// memory, the top-k would differ here and we'd fall back to the per-branch path.
+    func testBatchedFrontierMatchesPerBranch() async throws {
+        let runtime = try makeRuntime(enableKVFork: true)
+        let tok = runtime.tokenizer
+        let anchorText = "The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is"
+        let anchor = try tok.tokenize(anchorText)
+
+        let suffixes: [[TokenID]] = [
+            [],                              // root branch (cached anchor-end logits)
+            try tok.tokenize(" Mad"),
+            try tok.tokenize(" the largest"),
+            try tok.tokenize(" a"),
+            try tok.tokenize(" Barcelona and")
+        ]
+
+        // Per-branch ground truth from the single-branch path (itself gated against full decode).
+        var perBranch: [[TokenLogit]] = []
+        for suffix in suffixes {
+            perBranch.append(try await runtime.anchoredLogits(anchor: anchor, suffix: suffix))
+        }
+
+        // One batched call must reproduce every branch's distribution, in input order.
+        let batched = try await runtime.anchoredLogitsBatch(anchor: anchor, suffixes: suffixes)
+        XCTAssertEqual(batched.count, suffixes.count)
+        for (i, logits) in batched.enumerated() {
+            assertSameDistribution(logits, perBranch[i], "batched branch \(i) vs per-branch for suffix \(suffixes[i])")
+        }
+    }
+
+    /// A frontier wider than `n_seq_max` must still be correct: the runtime chunks it into multiple
+    /// batched decodes, and every branch's logits must match the per-branch path regardless of which
+    /// chunk it landed in. `maxSequences: 2` forces chunking with a 5-branch frontier.
+    func testBatchedFrontierChunksBeyondSeqMax() async throws {
+        try XCTSkipUnless(ModelContainer.defaultModelExists(), "Model file not present; skipping")
+        let runtime = try LlamaModelRuntime(
+            modelURL: try ModelContainer.modelURL(), contextLength: 2048, enableKVFork: true, maxSequences: 2
+        )
+        let tok = runtime.tokenizer
+        let anchor = try tok.tokenize("I am writing to let you know that the meeting tomorrow")
+        let suffixes: [[TokenID]] = [
+            try tok.tokenize(" is"), try tok.tokenize(" has"), try tok.tokenize(" will"),
+            try tok.tokenize(" at"), try tok.tokenize(" might be")
+        ]
+
+        var perBranch: [[TokenLogit]] = []
+        for suffix in suffixes {
+            perBranch.append(try await runtime.anchoredLogits(anchor: anchor, suffix: suffix))
+        }
+        let batched = try await runtime.anchoredLogitsBatch(anchor: anchor, suffixes: suffixes)
+        for (i, logits) in batched.enumerated() {
+            assertSameDistribution(logits, perBranch[i], "chunked batch branch \(i)")
+        }
+    }
+
     /// Disabling the flag falls back to the default full-decode path and must still be correct.
     func testDisabledForkMatchesFullDecode() async throws {
         let runtime = try makeRuntime(enableKVFork: false)
@@ -101,8 +169,8 @@ final class AnchoredLogitsCorrectnessTests: XCTestCase {
         let suffix = try tok.tokenize(" small")
 
         let truthRuntime = try makeRuntime(enableKVFork: false)
-        let expected = try await groundTruthTopK(truthRuntime, anchor: anchor, suffix: suffix, k: 5)
-        let got = topK(try await runtime.anchoredLogits(anchor: anchor, suffix: suffix), 5)
-        XCTAssertEqual(got, expected)
+        let expected = try await groundTruthLogits(truthRuntime, anchor: anchor, suffix: suffix)
+        let got = try await runtime.anchoredLogits(anchor: anchor, suffix: suffix)
+        assertSameDistribution(got, expected, "fork-disabled vs full decode")
     }
 }

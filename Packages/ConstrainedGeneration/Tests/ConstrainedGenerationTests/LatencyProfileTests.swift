@@ -31,6 +31,7 @@ final class LatencyProfileTests: XCTestCase {
         private(set) var prepareSeconds = 0.0
         private(set) var logitsCalls = 0
         private(set) var logitsSeconds = 0.0
+        private(set) var decodeCalls = 0        // distinct llama_decode round-trips (batched ⇒ fewer)
         private var lastPromptCount = 0
 
         init(_ runtime: LlamaModelRuntime) { self.wrapped = runtime }
@@ -40,10 +41,27 @@ final class LatencyProfileTests: XCTestCase {
             try await wrapped.prepare(promptTokens: promptTokens)
             prepareSeconds += seconds(since: start)
             prepareCalls += 1
+            decodeCalls += 1
             let decoded = await wrapped.lastPrepareDecodedCount
             tokensDecoded += decoded
             classifyAnchorDecode(decoded, anchorCount: promptTokens.count)
             lastPromptCount = promptTokens.count
+        }
+
+        /// Forwards the batched beam-frontier call (ADR-043) so the profile reflects the real
+        /// multi-sequence path: it counts as exactly ONE `llama_decode` round-trip for the whole
+        /// group, where the per-branch path would have counted one per branch.
+        func anchoredLogitsBatch(anchor: [TokenID], suffixes: [[TokenID]]) async throws -> [[TokenLogit]] {
+            let start = DispatchTime.now()
+            let result = try await wrapped.anchoredLogitsBatch(anchor: anchor, suffixes: suffixes)
+            prepareSeconds += seconds(since: start)
+            prepareCalls += 1
+            decodeCalls += 1
+            let anchorDecoded = await wrapped.lastPrepareDecodedCount
+            tokensDecoded += anchorDecoded + suffixes.reduce(0) { $0 + $1.count }
+            classifyAnchorDecode(anchorDecoded, anchorCount: anchor.count)
+            lastPromptCount = anchor.count
+            return result
         }
 
         /// The engine drives this (ADR-018). `lastPrepareDecodedCount` reflects only the *anchor*
@@ -162,6 +180,7 @@ final class LatencyProfileTests: XCTestCase {
             print("---- \(c.name) ----")
             print(String(format: "  prompt tokens     : %d", promptTokens))
             print(String(format: "  TOTAL             : %7.1f ms", total * 1000))
+            print(String(format: "  llama_decode calls: %d  (batched frontier ⇒ ~1 per depth level; ADR-043)", timed.decodeCalls))
             print(String(format: "  prepare (decode)  : %7.1f ms  (%.0f%%)  calls=%d",
                          timed.prepareSeconds * 1000, timed.prepareSeconds / total * 100, timed.prepareCalls))
             print(String(format: "    ├─ full prefills: %d  (re-decode whole prompt)", timed.fullPrefillCalls))

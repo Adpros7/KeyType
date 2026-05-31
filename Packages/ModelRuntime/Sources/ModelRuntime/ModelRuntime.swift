@@ -73,6 +73,13 @@ public protocol LocalModelRuntime {
     /// resident and decode only `suffix` (cheap KV fork). Semantically identical to
     /// `prepare(anchor + suffix)` followed by `logitsForNextToken()`.
     func anchoredLogits(anchor: [TokenID], suffix: [TokenID]) async throws -> [TokenLogit]
+
+    /// Next-token logits for `anchor + suffix` for *every* `suffix` in `suffixes`, returned in the
+    /// same order. Semantically identical to calling `anchoredLogits(anchor:suffix:)` once per
+    /// suffix, but lets a real runtime expand a whole beam frontier in a single batched
+    /// `llama_decode` (one GPU round-trip instead of one per branch — the dominant per-completion
+    /// cost; see ADR-043). Each branch is seeded with its own copy of the resident anchor state.
+    func anchoredLogitsBatch(anchor: [TokenID], suffixes: [[TokenID]]) async throws -> [[TokenLogit]]
 }
 
 public extension LocalModelRuntime {
@@ -81,6 +88,18 @@ public extension LocalModelRuntime {
     func anchoredLogits(anchor: [TokenID], suffix: [TokenID]) async throws -> [TokenLogit] {
         try await prepare(promptTokens: anchor + suffix)
         return try await logitsForNextToken()
+    }
+
+    /// Default: score each branch sequentially via `anchoredLogits`. Stubs and pure-Swift runtimes
+    /// keep this loop unchanged, so every deterministic engine/FIM test is byte-for-byte identical;
+    /// only `LlamaModelRuntime` overrides it with true multi-sequence batched decoding.
+    func anchoredLogitsBatch(anchor: [TokenID], suffixes: [[TokenID]]) async throws -> [[TokenLogit]] {
+        var out: [[TokenLogit]] = []
+        out.reserveCapacity(suffixes.count)
+        for suffix in suffixes {
+            out.append(try await anchoredLogits(anchor: anchor, suffix: suffix))
+        }
+        return out
     }
 
     /// Default: pure-Swift runtimes hold no native resources, so teardown is a no-op.

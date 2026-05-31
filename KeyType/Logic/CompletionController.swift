@@ -557,6 +557,10 @@ final class CompletionController {
         guard ModelContainer.modelExists(at: modelURL) else {
             throw CompletionLoadError.modelMissing(modelFilename)
         }
+        // Batched beam-frontier decoding (ADR-043): the runtime holds the whole beam frontier in
+        // parallel sequences and expands it in one `llama_decode` per depth level instead of one per
+        // branch. This is the default and only decode path; `maxSequences` defaults to cover the
+        // decoder's branch width plus the resident anchor.
         let runtime = try LlamaModelRuntime(modelURL: modelURL)
         // Resolve the tokenizer family from the model (catalog declaration, or derived from the
         // GGUF's vocab size for an imported model) so the profile filename + family validation match

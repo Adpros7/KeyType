@@ -39,6 +39,11 @@ public actor LlamaModelRuntime: LocalModelRuntime {
     /// restores that snapshot before decoding each branch's suffix — instead of re-prefilling the
     /// whole prompt per branch (see ADR-018). Gated so it can be disabled if ever incorrect.
     private nonisolated let enableKVFork: Bool
+    /// Number of distinct sequences the context can hold simultaneously (`n_ctx_params.n_seq_max`).
+    /// This is the most beam branches `anchoredLogitsBatch` can expand in a single `llama_decode`;
+    /// it bounds the resident per-sequence recurrent-state buffers (~19 MB each on this model), so
+    /// it tracks the decoder's `branchWidth` rather than being set large. See ADR-043.
+    private nonisolated let maxSequences: Int
     /// The single sequence the runtime decodes into.
     private nonisolated let anchorSeq: llama_seq_id = 0
     /// Tokens whose post-decode sequence state is captured in `anchorSnapshot`.
@@ -63,7 +68,17 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         modelURL: URL,
         contextLength: Int = 4096,
         reuseThreshold: Int = 8,
-        enableKVFork: Bool = true
+        enableKVFork: Bool = true,
+        // The beam frontier is decoded in parallel sequences (ADR-043) — this is the default and only
+        // decode path. Sized to exactly the decoder's `branchWidth` (4): the anchor is held as a
+        // serialized snapshot, not a concurrent live sequence, so peak concurrent sequences equals
+        // the branch count. An on-device sweep showed latency plateaus once `n_seq_max ≥ branchWidth`
+        // (4/5/8 are within noise — `n_seq_max` is a recurrent-buffer capacity bound, not the matmul
+        // batch dimension, so there is no power-of-two effect); wider frontiers chunk gracefully.
+        // On this hybrid model the parallel (split) recurrent path reorders near-tied logits by ~0.12
+        // vs a lone single-sequence decode (same envelope ADR-012/018 already accepted: identical
+        // argmax and top-k set, only ranks 3+ of near-ties shuffle).
+        maxSequences: Int = 4
     ) throws {
         guard ModelContainer.modelExists(at: modelURL) else {
             throw LlamaRuntimeError.modelFileMissing(path: modelURL.path)
@@ -78,10 +93,18 @@ public actor LlamaModelRuntime: LocalModelRuntime {
             throw LlamaRuntimeError.modelLoadFailed
         }
 
+        let seqMax = max(1, maxSequences)
         var ctxParams = llama_context_default_params()
         ctxParams.n_ctx = UInt32(contextLength)
         ctxParams.n_batch = max(512, UInt32(contextLength))
         ctxParams.n_ubatch = min(ctxParams.n_batch, 512)
+        // Allow the beam frontier to live in parallel sequences so `anchoredLogitsBatch` can expand
+        // it in one decode (ADR-043). Costs ~one recurrent-state buffer per sequence.
+        ctxParams.n_seq_max = UInt32(seqMax)
+        // Unified KV buffer across sequences: our branch sequences all share the long anchor prefix
+        // (the case unified is meant for), and it makes the cache a single `n_ctx`-cell pool shared
+        // across sequences — which is the budget the batched path's group-size cap assumes.
+        ctxParams.kv_unified = true
         ctxParams.no_perf = true
 
         guard let loadedCtx = llama_init_from_model(loadedModel, ctxParams) else {
@@ -113,6 +136,7 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         self.reuseThreshold = max(0, reuseThreshold)
         self.nBatch = Int(llama_n_batch(loadedCtx))
         self.enableKVFork = enableKVFork
+        self.maxSequences = Int(llama_n_seq_max(loadedCtx))
         self.metadata = ModelMetadata(
             identifier: modelURL.lastPathComponent,
             family: "llama",
@@ -277,6 +301,119 @@ public actor LlamaModelRuntime: LocalModelRuntime {
         return try readLogits()
     }
 
+    /// Batched beam-frontier expansion (ADR-043): decode `anchor + suffix` for every `suffix` in a
+    /// single `llama_decode` per group of up to `maxSequences` branches, instead of one decode call
+    /// per branch. Each branch is seeded into its own sequence with a fresh copy of the resident
+    /// anchor snapshot (cheap — ~0.3 ms), then one batch advances them all in parallel; the dominant
+    /// per-completion cost is the *number* of `llama_decode` round-trips, so collapsing 12 branch
+    /// calls into ~3 batched ones roughly halves latency. Results are returned in input order and
+    /// are identical (top-k) to scoring each branch with `anchoredLogits`.
+    public func anchoredLogitsBatch(anchor: [TokenID], suffixes: [[TokenID]]) async throws -> [[TokenLogit]] {
+        guard enableKVFork else {
+            var out: [[TokenLogit]] = []
+            out.reserveCapacity(suffixes.count)
+            for suffix in suffixes { out.append(try await anchoredLogits(anchor: anchor, suffix: suffix)) }
+            return out
+        }
+        guard !suffixes.isEmpty else { return [] }
+        let longest = anchor.count + (suffixes.map(\.count).max() ?? 0)
+        if longest > metadata.contextLength {
+            throw LlamaRuntimeError.promptTooLong(promptTokens: longest, contextLength: metadata.contextLength)
+        }
+
+        // Decode the anchor once (or reuse the resident snapshot); the per-branch seeds copy it.
+        try ensureAnchor(anchor)
+
+        var results = [[TokenLogit]](repeating: [], count: suffixes.count)
+
+        // Empty-suffix (root) branches reuse the cached anchor-end logits — no decode needed, and
+        // always valid even after a sibling branch overwrote the live logits buffer.
+        var pending: [(index: Int, suffix: [TokenID])] = []
+        for (i, suffix) in suffixes.enumerated() {
+            if suffix.isEmpty {
+                results[i] = try anchorEndLogits ?? readLogits()
+            } else {
+                pending.append((index: i, suffix: suffix))
+            }
+        }
+        guard !pending.isEmpty else { return results }
+
+        // How many branches can share the cache at once: bounded by `n_seq_max` and by the cell
+        // budget (each seeded sequence holds its own copy of the anchor, so total cells ≈
+        // seqs × (anchor + suffix) must fit in n_ctx). Falls back to 1 (purely sequential) for very
+        // long prompts, so correctness never depends on the prompt fitting many times over.
+        let cellsPerSeq = anchor.count + (pending.map(\.suffix.count).max() ?? 0)
+        let budgetCap = max(1, metadata.contextLength / max(1, cellsPerSeq))
+        let groupSize = max(1, min(maxSequences, budgetCap))
+
+        var cursor = 0
+        while cursor < pending.count {
+            let end = min(cursor + groupSize, pending.count)
+            try decodeBranchGroup(anchor: anchor, group: Array(pending[cursor..<end]), into: &results)
+            cursor = end
+        }
+
+        // Leave the resident token bookkeeping at the pristine anchor. Future `ensureAnchor` reuse
+        // and any interleaved single-branch `anchoredLogits` restore from the snapshot, so they do
+        // not depend on whatever the last batched group left live in the sequences.
+        currentTokens = anchor
+        return results
+    }
+
+    /// Seeds each branch in `group` into its own sequence (a copy of the anchor snapshot), then runs
+    /// one `llama_decode` over all their suffix tokens and reads each branch's final-token logits.
+    private func decodeBranchGroup(
+        anchor: [TokenID],
+        group: [(index: Int, suffix: [TokenID])],
+        into results: inout [[TokenLogit]]
+    ) throws {
+        guard let snapshot = anchorSnapshot else { throw LlamaRuntimeError.sequenceStateSnapshotFailed }
+
+        // Fresh cache, then one anchor copy per branch sequence (slot 0..<group.count).
+        llama_memory_clear(memory, true)
+        for slot in group.indices {
+            try restore(snapshot, intoSeq: llama_seq_id(slot))
+        }
+
+        let totalTokens = group.reduce(0) { $0 + $1.suffix.count }
+        var batch = llama_batch_init(Int32(totalTokens), 0, 1)
+        defer { llama_batch_free(batch) }
+
+        var lastBatchIndex = [Int](repeating: -1, count: group.count)
+        var cursor = 0
+        for (slot, item) in group.enumerated() {
+            for (k, token) in item.suffix.enumerated() {
+                batch.token[cursor] = llama_token(token)
+                batch.pos[cursor] = llama_pos(anchor.count + k)
+                batch.n_seq_id[cursor] = 1
+                batch.seq_id[cursor]![0] = llama_seq_id(slot)
+                let isLast = (k == item.suffix.count - 1)
+                batch.logits[cursor] = isLast ? 1 : 0
+                if isLast { lastBatchIndex[slot] = cursor }
+                cursor += 1
+            }
+        }
+        batch.n_tokens = Int32(totalTokens)
+
+        let rc = llama_decode(ctx, batch)
+        if rc != 0 { throw LlamaRuntimeError.decodeFailed(rc) }
+
+        let vocabSize = metadata.vocabularySize
+        for (slot, item) in group.enumerated() {
+            let idx = lastBatchIndex[slot]
+            guard idx >= 0, let raw = llama_get_logits_ith(ctx, Int32(idx)) else {
+                throw LlamaRuntimeError.logitsUnavailable
+            }
+            let buffer = UnsafeBufferPointer(start: raw, count: vocabSize)
+            results[item.index] = [TokenLogit](unsafeUninitializedCapacity: vocabSize) { dst, initializedCount in
+                for v in 0..<vocabSize {
+                    dst[v] = TokenLogit(tokenID: TokenID(v), logit: buffer[v])
+                }
+                initializedCount = vocabSize
+            }
+        }
+    }
+
     /// Makes `anchorSnapshot`/`anchorEndLogits` describe exactly `anchor`. Reuses an existing
     /// snapshot when `anchor` extends it (cross-keystroke append decodes only the typed delta);
     /// otherwise clears and fully decodes. No `reuseThreshold` gate — a single typed token must
@@ -326,8 +463,14 @@ public actor LlamaModelRuntime: LocalModelRuntime {
     }
 
     private func restore(_ snapshot: [UInt8]) throws {
+        try restore(snapshot, intoSeq: anchorSeq)
+    }
+
+    /// Restores a captured sequence snapshot into an arbitrary destination sequence. Used by the
+    /// batched path to seed each branch's sequence with its own copy of the anchor.
+    private func restore(_ snapshot: [UInt8], intoSeq seqID: llama_seq_id) throws {
         let read = snapshot.withUnsafeBufferPointer {
-            llama_state_seq_set_data(ctx, $0.baseAddress, snapshot.count, anchorSeq)
+            llama_state_seq_set_data(ctx, $0.baseAddress, snapshot.count, seqID)
         }
         guard read > 0 else { throw LlamaRuntimeError.sequenceStateSnapshotFailed }
     }

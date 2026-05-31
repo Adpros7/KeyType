@@ -1684,3 +1684,56 @@ text. Both are now closed:
     language-independent and directly tied to "text at the cursor".
   - The Icon Composer package keeps separate light, dark, and clear/tinted raster sources rather than
     relying on automatic darkening of the light source, preserving contrast in dark mode.
+
+## ADR-043: Batched beam-frontier decoding — one `llama_decode` per depth level
+
+- Date: 2026-05-31
+- Status: accepted
+- Context: A fresh profile (`LatencyProfileTests` + a new `PrefillVsBranchMicroBench`) of the warm
+  completion path (Qwen3.5-2B-Base Q4_K_M, release, M5 Max) showed ~97% of latency is model forward
+  passes, and the cost is dominated by the **number of `llama_decode` round-trips**, not token
+  compute. A depth-4 width-4 beam makes **13 decode calls** (`1 + 3·branchWidth`): one prefill plus
+  one per branch expansion (ADR-018 already reuses the prompt KV). The micro-bench decomposed a
+  single branch call (~4.5 ms) into restore ~0.32 ms, marginal compute ~0.6 ms/token, and a **~3.6 ms
+  fixed cost per `llama_decode`** (Metal command-buffer submit/sync + the 151,936-wide LM-head
+  projection). So the 12 per-branch calls were ~75% of latency, mostly fixed overhead — the snapshot
+  restore from ADR-018 is *not* the bottleneck.
+- Decision: expand the whole beam frontier in **one** `llama_decode` per depth level instead of one
+  per branch.
+  - New `LocalModelRuntime.anchoredLogitsBatch(anchor:suffixes:)` returns per-branch next-token
+    logits in input order. A default protocol extension loops over `anchoredLogits`, so every stub
+    runtime and all deterministic engine/FIM tests are byte-for-byte unchanged. The engine collects
+    all live branches per level and calls it once.
+  - `LlamaModelRuntime` seeds each branch into its own sequence with a fresh copy of the resident
+    anchor snapshot (`llama_state_seq_set_data` into seq `0..<W` — ~0.32 ms each), then issues a
+    single batched `llama_decode` carrying every branch's suffix tokens tagged to its sequence, and
+    reads each branch's final-token logits via `llama_get_logits_ith`. `n_seq_max` is sized to exactly
+    `branchWidth` (4) — the anchor is held as a serialized snapshot, not a concurrent live sequence,
+    so peak concurrent sequences equals the branch count. An on-device sweep confirmed latency
+    plateaus once `n_seq_max ≥ branchWidth` (1→88 ms, 4→64 ms, 5→65 ms, 8→66 ms): `n_seq_max` is a
+    recurrent-buffer capacity bound, not the GPU matmul batch dimension (that's the token count per
+    decode, driven by `branchWidth`), so there is **no power-of-two effect** and extra slots only
+    waste ~19 MB each. `kv_unified = true` keeps the cache a single `n_ctx`-cell pool (the budget the
+    group-size cap assumes) and suits the shared-anchor case. Frontiers wider than `n_seq_max`, or
+    prompts too long to seed many copies within `n_ctx`, chunk into multiple batched decodes
+    (graceful, still correct). `seq_cp` is still avoided (it aborts on this hybrid recurrent memory,
+    ADR-018); cross-sequence seeding uses `state_seq_set_data`, which the gating tests validate.
+  - **This is the default and only decode path.** `enableKVFork: false` remains as a debug fallback
+    (sequential per-branch), but the shipped runtime always batches (`maxSequences` default 4).
+- Consequences:
+  - `llama_decode` calls drop **13 → 4** per completion. Warm cold-start latency falls from ~87 ms to
+    **~65 ms (~1.3×)** on the medium case; the **displayed candidate set is byte-for-byte identical**
+    to the per-branch path across the profile's four cases. The win is bounded below 2× because the
+    LM-head projection (full 151,936 vocab) runs once **per branch** regardless of batching — only the
+    command-buffer/sync fixed cost is amortized. Reaching the full 2× requires *also* cutting the
+    number of branches (confidence-gated / adaptive beam width), which is the natural follow-up and
+    stacks cleanly on this API.
+  - **Quality envelope.** Decoding branches in parallel puts this hybrid model's recurrent layers on
+    the split path, which reorders **near-tied** logits (ranks 3+) by ≤~0.12 vs a lone single-sequence
+    decode — the same envelope ADR-012/018 already accepted. The argmax and top-k *set* are preserved
+    (gated by `AnchoredLogitsCorrectnessTests.assertSameDistribution`: identical argmax + identical
+    top-5 set), so the shown ghost text never changes; only the order of lower-ranked alternates may.
+    Because raising `n_seq_max` perturbs even the single-branch path into this envelope, the prior
+    exact-order assertions were relaxed to argmax + set across all KV-reuse tests.
+  - Memory: ~one recurrent-state buffer per sequence (~19 MB × 4 ≈ ~76 MB resident), well under the
+    ~300 MB ADR-012 flagged for `n_seq_max=16`.

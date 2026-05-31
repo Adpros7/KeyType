@@ -60,14 +60,20 @@ public final class ConstrainedGenerationEngine: CompletionGenerating {
             try Task.checkCancellation()
             if live.isEmpty { break }
 
+            // Batched beam-frontier expansion (ADR-043): score every live branch in ONE runtime
+            // call. `LlamaModelRuntime` seeds each branch into its own sequence (a copy of the
+            // resident anchor — ADR-018) and advances them all in a single `llama_decode`, instead
+            // of one GPU round-trip per branch. The default protocol extension loops, so stub-backed
+            // tests behave identically. Results come back in the same order as `live`.
+            let frontierLogits = try await runtime.anchoredLogitsBatch(
+                anchor: basePrompt,
+                suffixes: live.map(\.tokenIDs)
+            )
+
             var nextLive: [GenerationBranch] = []
-            for branch in live {
+            for (branch, logits) in zip(live, frontierLogits) {
                 try Task.checkCancellation()
 
-                // Anchored reuse (ADR-018): the base prompt is decoded once and kept resident; each
-                // branch only decodes its own divergent suffix. Across keystrokes the anchor grows
-                // by the typed tokens, so steady-state typing decodes only the typed delta.
-                let logits = try await runtime.anchoredLogits(anchor: basePrompt, suffix: branch.tokenIDs)
                 guard !logits.isEmpty else {
                     finalizeIfValid(branch, into: &finalized)
                     continue
