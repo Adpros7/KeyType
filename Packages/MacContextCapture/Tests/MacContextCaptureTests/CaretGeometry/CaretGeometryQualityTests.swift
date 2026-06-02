@@ -3,6 +3,7 @@
 //  MacContextCaptureTests
 //
 
+import AppKit
 import XCTest
 @testable import MacContextCapture
 
@@ -86,5 +87,22 @@ final class CaretGeometryQualityTests: XCTestCase {
         let lineCaret = CGRect(x: 220, y: 158, width: 2, height: 20)
 
         XCTAssertFalse(AXCaretGeometryResolver.rectLooksLikeTextContainer(lineCaret, anchor: field))
+    }
+
+    func testEstimatedCaretLayoutAccountsForSoftWrappedLines() {
+        let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        let characterWidth = ("a" as NSString).size(withAttributes: [.font: font]).width
+        let text = "aaaa aaaa aaaa"
+
+        let layout = AXCaretGeometryResolver.estimatedSoftWrappedCaretLayout(
+            in: text,
+            selection: NSRange(location: (text as NSString).length, length: 0),
+            availableWidth: characterWidth * 10.5,
+            font: font,
+            widthBias: 1
+        )
+
+        XCTAssertEqual(layout.lineIndex, 1)
+        XCTAssertEqual(layout.xOffset, characterWidth * 4, accuracy: 0.5)
     }
 }

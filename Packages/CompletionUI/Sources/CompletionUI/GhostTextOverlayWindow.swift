@@ -211,6 +211,18 @@ public final class GhostTextOverlayWindow {
         let firstLineInset = max(0, caret.maxX - field.minX)
         let firstLineWidth = max(1, field.maxX - caret.maxX)
         let fullLineWidth = max(1, field.width)
+        if singleLineWidth <= firstLineWidth {
+            return Layout(
+                frame: CGRect(
+                    x: placement.isRightToLeft ? caret.minX - singleLineWidth : caret.maxX,
+                    y: caret.minY + (caret.height - lineHeight) / 2,
+                    width: singleLineWidth,
+                    height: lineHeight
+                ),
+                lines: [GhostTextLine(text: text, reservedHeight: lineHeight)],
+                lineHeight: lineHeight
+            )
+        }
         let lines = wrappedLines(
             for: text,
             font: font,

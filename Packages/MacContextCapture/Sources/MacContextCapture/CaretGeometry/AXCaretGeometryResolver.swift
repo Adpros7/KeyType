@@ -391,13 +391,19 @@ public struct AXCaretGeometryResolver {
     ) -> CGRect {
         let lineHeight = min(max(NSFont.systemFont(ofSize: 15).boundingRectForFont.height, 18), 24)
         let height = min(cocoaRect.height, lineHeight)
-        let x = min(conservativeEstimatedCaretX(in: cocoaRect, text: text, selection: selection), cocoaRect.maxX)
 
         guard cocoaRect.height > lineHeight * 2 else {
+            let x = min(conservativeEstimatedCaretX(in: cocoaRect, text: text, selection: selection), cocoaRect.maxX)
             return CGRect(x: x, y: cocoaRect.minY, width: 2, height: height)
         }
 
-        let lineIndex = CGFloat(currentLineIndex(in: text, selection: selection))
+        let wrapped = Self.estimatedSoftWrappedCaretLayout(
+            in: text,
+            selection: selection,
+            availableWidth: cocoaRect.width
+        )
+        let x = min(cocoaRect.minX + wrapped.xOffset, cocoaRect.maxX)
+        let lineIndex = CGFloat(wrapped.lineIndex)
         let topPadding: CGFloat = 2
         let estimatedY = cocoaRect.maxY - topPadding - ((lineIndex + 1) * lineHeight)
         let clampedY = min(max(estimatedY, cocoaRect.minY), cocoaRect.maxY - height)
@@ -405,18 +411,113 @@ public struct AXCaretGeometryResolver {
         return CGRect(x: x, y: clampedY, width: 2, height: height)
     }
 
+    nonisolated static func estimatedSoftWrappedCaretLayout(
+        in text: String,
+        selection: NSRange,
+        availableWidth: CGFloat,
+        font: NSFont = NSFont.systemFont(ofSize: 15),
+        widthBias: CGFloat = 1.1
+    ) -> (lineIndex: Int, xOffset: CGFloat) {
+        let nsText = text as NSString
+        let safeLocation = min(max(selection.location, 0), nsText.length)
+        let prefix = nsText.substring(to: safeLocation)
+        let logicalLines = prefix.components(separatedBy: .newlines)
+        let width = max(1, availableWidth)
+
+        var visualLineBase = 0
+        for (index, line) in logicalLines.enumerated() {
+            let wrapped = estimatedWrappedLineLayout(
+                for: line,
+                availableWidth: width,
+                font: font,
+                widthBias: widthBias
+            )
+            if index == logicalLines.count - 1 {
+                return (
+                    lineIndex: visualLineBase + wrapped.lineIndex,
+                    xOffset: min(max(0, wrapped.xOffset), width)
+                )
+            }
+            visualLineBase += wrapped.lineIndex + 1
+        }
+
+        return (lineIndex: 0, xOffset: 0)
+    }
+
+    private nonisolated static func estimatedWrappedLineLayout(
+        for line: String,
+        availableWidth: CGFloat,
+        font: NSFont,
+        widthBias: CGFloat
+    ) -> (lineIndex: Int, xOffset: CGFloat) {
+        guard !line.isEmpty else {
+            return (lineIndex: 0, xOffset: 0)
+        }
+
+        let width = max(1, availableWidth)
+        var lineIndex = 0
+        var currentWidth: CGFloat = 0
+
+        for rawToken in wrappingTokens(in: line) {
+            var token = rawToken
+            if currentWidth == 0 {
+                token = token.trimmingCharacters(in: .whitespaces)
+            }
+            guard !token.isEmpty else { continue }
+
+            var tokenWidth = estimatedTextWidth(token, font: font, widthBias: widthBias)
+            if currentWidth > 0, currentWidth + tokenWidth > width {
+                lineIndex += 1
+                currentWidth = 0
+                token = token.trimmingCharacters(in: .whitespaces)
+                guard !token.isEmpty else { continue }
+                tokenWidth = estimatedTextWidth(token, font: font, widthBias: widthBias)
+            }
+
+            if tokenWidth > width {
+                let occupiedLines = floor(tokenWidth / width)
+                lineIndex += Int(occupiedLines)
+                currentWidth = tokenWidth - occupiedLines * width
+                if currentWidth == 0, occupiedLines > 0 {
+                    currentWidth = width
+                }
+            } else {
+                currentWidth += tokenWidth
+            }
+        }
+
+        return (lineIndex: lineIndex, xOffset: currentWidth)
+    }
+
+    private nonisolated static func wrappingTokens(in text: String) -> [String] {
+        var tokens: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let start = index
+            let isWhitespace = text[index].isWhitespace
+            while index < text.endIndex, text[index].isWhitespace == isWhitespace {
+                index = text.index(after: index)
+            }
+            tokens.append(String(text[start..<index]))
+        }
+        return tokens
+    }
+
+    private nonisolated static func estimatedTextWidth(
+        _ text: String,
+        font: NSFont,
+        widthBias: CGFloat
+    ) -> CGFloat {
+        let measuredWidth = (text as NSString).size(withAttributes: [.font: font]).width * widthBias
+        let perCharacterCeiling: CGFloat = 13.3 * widthBias
+        return min(measuredWidth, CGFloat((text as NSString).length) * perCharacterCeiling)
+    }
+
     private func currentLinePrefix(in text: String, selection: NSRange) -> String {
         let nsText = text as NSString
         let safeLocation = min(selection.location, nsText.length)
         let prefix = nsText.substring(to: safeLocation)
         return prefix.components(separatedBy: .newlines).last ?? prefix
-    }
-
-    private func currentLineIndex(in text: String, selection: NSRange) -> Int {
-        let nsText = text as NSString
-        let safeLocation = min(selection.location, nsText.length)
-        let prefix = nsText.substring(to: safeLocation)
-        return max(0, prefix.components(separatedBy: .newlines).count - 1)
     }
 
     private func rectIsNearAnchor(_ cocoaRect: CGRect, anchor: CGRect?) -> Bool {

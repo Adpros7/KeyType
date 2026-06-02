@@ -235,7 +235,7 @@ final class CompletionUITests: XCTestCase {
     }
 
     @MainActor
-    func testInlineCompletionKeepsSingleLineWhenFirstVisibleTokenFits() {
+    func testMultilineFieldKeepsFittingCompletionSingleLineAtCaret() {
         let font = NSFont.systemFont(ofSize: 14)
         let placement = OverlayPlacement(
             cursorRect: CGRect(x: 200, y: 100, width: 2, height: 18),
@@ -244,7 +244,10 @@ final class CompletionUITests: XCTestCase {
 
         let layout = GhostTextOverlayWindow.layout(for: " continuation", font: font, placement: placement)
 
+        XCTAssertEqual(layout.frame.minX, placement.cursorRect.maxX)
+        XCTAssertLessThan(layout.frame.width, placement.fieldRect?.width ?? .infinity)
         XCTAssertEqual(layout.lines.map(\.text), [" continuation"])
+        XCTAssertEqual(layout.lines.map(\.leadingInset), [0])
     }
 
     // MARK: - Advance past an accepted word

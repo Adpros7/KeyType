@@ -92,6 +92,7 @@ row here.**
 | 070 | End-to-end latency telemetry + Statistics distribution chart | performance/ui |
 | 071 | Treat Chromium browsers as known web-backed targets | context-capture |
 | 072 | Stabilize Obsidian ghost-text rendering | app-compatibility/ui |
+| 073 | Estimate caret geometry across soft-wrapped lines | context-capture/ui |
 
 ---
 
@@ -2725,3 +2726,24 @@ text. Both are now closed:
   browser chrome continuations, and inline ghost text no longer inherits heading-sized AX runs.
   True mid-line completions still use the capsule when geometry says the caret is not at end of line.
   Other rich editors keep their resolved AX font, so Notes/TextEdit-style matching is unchanged.
+
+## ADR-073 — Estimate caret geometry across soft-wrapped lines
+
+- Date: 2026-06-03
+- Status: accepted
+- Context: In Codex's web composer, the ghost text could appear at the beginning of the line once
+  the typed prompt visually wrapped. That was not a Codex-only overlay bug: when AX cannot provide an
+  exact caret rect, `AXFrameEstimate` measured the entire logical line before the cursor and clamped
+  X to the field's right edge. For soft-wrapped web text, that falsely reports "no room remains on
+  the current line", so the inline overlay takes its legitimate next-line wrapping path even though
+  the visual caret has space after it.
+- Decision: keep true no-room ghost text wrapping, but make estimated multiline caret geometry
+  account for soft-wrapped visual lines. The estimator token-wraps the pre-caret logical lines within
+  the field width and returns the current visual-line X offset and visual line index instead of
+  clamping long logical lines to the trailing edge. `CompletionUI` also short-circuits to the simple
+  caret-anchored single-line layout whenever the measured completion fits in the remaining current
+  line width, so wrapping is only entered after geometry says it is needed.
+- Consequences: Codex and other web-backed multiline composers with estimated caret geometry no
+  longer look like they are always at the right edge after the first visual line. Real trailing-edge
+  cases still wrap ghost text to the next visual line rather than switching to a capsule or drawing
+  past the field.
