@@ -106,7 +106,7 @@ final class AppCompatibilityTests: XCTestCase {
         XCTAssertTrue(policy.insertionRequiresPasteAndMatchStyle)
         XCTAssertNil(policy.stringInjectionChunkSize)
         XCTAssertEqual(policy.overlayPreference, .textMirror)
-        XCTAssertEqual(policy.verticalAlignmentOffset(24), 20, accuracy: 0.001)
+        XCTAssertEqual(policy.verticalAlignmentOffset(24), 24, accuracy: 0.001)
         XCTAssertEqual(policy.customInstructions, [
             "Continue the current Slack message only. Keep it short and conversational."
         ])
@@ -132,6 +132,40 @@ final class AppCompatibilityTests: XCTestCase {
         ])
     }
 
+    func testNotionNativeUsesTextMirrorWithVerticalAlignmentFix() {
+        let target = AppTarget(bundleIdentifier: "notion.id", appName: "Notion")
+        let context = TextFieldContext(beforeCursor: "K", target: target)
+
+        let policy = AppCompatibilityStore().policy(for: context)
+
+        XCTAssertTrue(policy.isCompletionEnabled)
+        XCTAssertTrue(policy.insertionRequiresPasteAndMatchStyle)
+        XCTAssertEqual(policy.overlayPreference, .textMirror)
+        XCTAssertEqual(policy.verticalAlignmentOffset(24), 24, accuracy: 0.001)
+        XCTAssertEqual(policy.customInstructions, [
+            "Continue the current Notion block only; do not include page chrome or database UI text."
+        ])
+    }
+
+    func testNotionDomainKeepsWebSurfacePolicyWithoutNativeOffset() {
+        let target = AppTarget(
+            bundleIdentifier: "com.google.Chrome",
+            appName: "Chrome",
+            domain: "notion.so"
+        )
+        let context = TextFieldContext(beforeCursor: "K", target: target)
+
+        let policy = AppCompatibilityStore().policy(for: context)
+
+        XCTAssertTrue(policy.isCompletionEnabled)
+        XCTAssertTrue(policy.insertionRequiresPasteAndMatchStyle)
+        XCTAssertEqual(policy.overlayPreference, .textMirror)
+        XCTAssertEqual(policy.verticalAlignmentOffset(24), 0, accuracy: 0.001)
+        XCTAssertEqual(policy.customInstructions, [
+            "Continue the current Notion block only; do not include page chrome or database UI text."
+        ])
+    }
+
     func testDiscordNativeUsesTextMirrorWithVerticalAlignmentFix() {
         let target = AppTarget(bundleIdentifier: "com.hnc.Discord", appName: "Discord")
         let context = TextFieldContext(beforeCursor: "This", target: target)
@@ -142,7 +176,7 @@ final class AppCompatibilityTests: XCTestCase {
         XCTAssertFalse(policy.insertionRequiresPasteAndMatchStyle)
         XCTAssertEqual(policy.stringInjectionChunkSize, 8)
         XCTAssertEqual(policy.overlayPreference, .textMirror)
-        XCTAssertEqual(policy.verticalAlignmentOffset(24), 24, accuracy: 0.001)
+        XCTAssertEqual(policy.verticalAlignmentOffset(24), 26, accuracy: 0.001)
         XCTAssertEqual(policy.customInstructions, [
             "Continue the current Discord message only. Keep it short and conversational."
         ])

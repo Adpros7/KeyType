@@ -147,6 +147,7 @@ public extension AppCompatibilityStore {
             TargetOverride(
                 bundleIdentifier: "notion.id",
                 requiresPasteAndMatchStyle: true,
+                verticalAlignmentOffset: { lineHeight in lineHeight },
                 overlayPreference: .textMirror,
                 customInstructions: "Continue the current Notion block only; do not include page chrome or database UI text."
             ),
