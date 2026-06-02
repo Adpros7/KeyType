@@ -49,7 +49,7 @@ public final class MacContextCaptureService: FocusedTextContextCapturing, Contex
     @MainActor
     private static func captureOnMain() -> TextFieldContext? {
         let system = AXUIElementCreateSystemWide()
-        guard let element = systemFocusedElement(from: system) else {
+        guard let element = AXCaretHelper.focusedElement(systemElement: system) else {
             // Fall back to the bundle-id-only context we used to return so callers that just want
             // to know which app is frontmost still get an answer.
             let app = NSWorkspace.shared.frontmostApplication
@@ -65,19 +65,5 @@ public final class MacContextCaptureService: FocusedTextContextCapturing, Contex
 
         let reader = FocusedFieldReader()
         return reader.snapshot(of: element)?.context
-    }
-
-    @MainActor
-    private static func systemFocusedElement(from system: AXUIElement) -> AXUIElement? {
-        var focused: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(
-            system,
-            kAXFocusedUIElementAttribute as CFString,
-            &focused
-        )
-        guard result == .success, let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        return (focused as! AXUIElement)
     }
 }

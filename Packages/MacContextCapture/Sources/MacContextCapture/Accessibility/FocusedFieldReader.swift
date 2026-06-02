@@ -51,7 +51,14 @@ public struct FocusedFieldReader {
     /// Read the focused AX element into a snapshot. Returns nil if the element has no AX
     /// value (likely not a text-bearing field).
     public func snapshot(of element: AXUIElement) -> FocusedFieldSnapshot? {
-        let textElement = Self.textElement(for: element)
+        let initialTarget = AppTargetResolver.resolveAppTarget(for: element)
+        let isKnownWebBackedApp = webAppClassifier.isWebBacked(
+            bundleIdentifier: initialTarget.bundleIdentifier
+        )
+        let textElement = Self.textElement(
+            for: element,
+            preferDescendantTextElement: isKnownWebBackedApp
+        )
         let target = AppTargetResolver.resolveAppTarget(for: textElement)
         let caretGeometry = resolver.resolveCaretRect(for: textElement)
 
@@ -126,17 +133,23 @@ public struct FocusedFieldReader {
     /// Chromium/Safari often expose the focused node as the whole `AXWebArea` while the editable
     /// control is a descendant. Use the focused node when it already has a selection range; otherwise
     /// pick the first bounded descendant that looks like the active text control.
-    private static func textElement(for element: AXUIElement) -> AXUIElement {
-        if isUsableTextElement(element) {
+    private static func textElement(
+        for element: AXUIElement,
+        preferDescendantTextElement: Bool = false
+    ) -> AXUIElement {
+        let rootIsUsable = isUsableTextElement(element)
+        let shouldSearchDescendants = preferDescendantTextElement
+            && (isWebContainerRole(element) || !rootIsUsable)
+        if rootIsUsable, !shouldSearchDescendants {
             return element
         }
 
         var queue: [(element: AXUIElement, depth: Int)] = [(element, 0)]
-        let maxDepth = 8
-        let maxNodes = 240
+        let maxDepth = shouldSearchDescendants ? 32 : 8
+        let maxNodes = shouldSearchDescendants ? 2_500 : 240
         var visited = 0
         var seen = Set<String>()
-        var bestCandidate: (element: AXUIElement, score: Int, minY: CGFloat)?
+        var bestCandidate: (element: AXUIElement, score: Int, tieBreaker: CGFloat)?
 
         let rootIdentity = AXCaretHelper.elementIdentity(for: element)
 
@@ -148,11 +161,14 @@ public struct FocusedFieldReader {
 
             if identity != rootIdentity, isUsableTextElement(candidate) {
                 let score = textElementCandidateScore(candidate)
-                let minY = fieldRect(for: candidate)?.minY ?? .greatestFiniteMagnitude
+                let frame = fieldRect(for: candidate)
+                let tieBreaker = shouldSearchDescendants
+                    ? (frame?.maxY ?? -.greatestFiniteMagnitude)
+                    : -(frame?.minY ?? .greatestFiniteMagnitude)
                 if bestCandidate == nil
                     || score > bestCandidate!.score
-                    || (score == bestCandidate!.score && minY < bestCandidate!.minY) {
-                    bestCandidate = (candidate, score, minY)
+                    || (score == bestCandidate!.score && tieBreaker > bestCandidate!.tieBreaker) {
+                    bestCandidate = (candidate, score, tieBreaker)
                 }
             }
 
@@ -163,6 +179,15 @@ public struct FocusedFieldReader {
         }
 
         return bestCandidate?.element ?? element
+    }
+
+    private static func isWebContainerRole(_ element: AXUIElement) -> Bool {
+        let role = AXCaretHelper.stringValue(for: kAXRoleAttribute as CFString, on: element)
+        let subrole = AXCaretHelper.stringValue(for: kAXSubroleAttribute as CFString, on: element)
+        return role == "AXWebArea"
+            || role == "AXDocument"
+            || subrole == "AXWebArea"
+            || subrole == "AXDocument"
     }
 
     private static func isUsableTextElement(_ element: AXUIElement) -> Bool {

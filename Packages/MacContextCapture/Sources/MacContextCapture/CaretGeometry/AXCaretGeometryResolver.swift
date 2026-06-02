@@ -430,6 +430,44 @@ public struct AXCaretGeometryResolver {
 }
 
 enum AXCaretHelper {
+    static func focusedElement(systemElement: AXUIElement) -> AXUIElement? {
+        if let focused = focusedElement(on: systemElement) {
+            return focused
+        }
+        return focusedElementInFrontmostApplication()
+    }
+
+    static func focusedElementInFrontmostApplication() -> AXUIElement? {
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            return nil
+        }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        return focusedElement(on: appElement)
+    }
+
+    static func focusedElement(on element: AXUIElement) -> AXUIElement? {
+        guard let value = copyAttributeValue(kAXFocusedUIElementAttribute as CFString, on: element),
+              CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        return unsafeBitCast(value, to: AXUIElement.self)
+    }
+
+    @discardableResult
+    static func enableEnhancedUserInterface(on appElement: AXUIElement) -> Bool {
+        guard let value = kCFBooleanTrue else {
+            return false
+        }
+        let result = AXUIElementSetAttributeValue(
+            appElement,
+            "AXEnhancedUserInterface" as CFString,
+            value as CFTypeRef
+        )
+        // Chromium sometimes applies the value while still returning kAXErrorCannotComplete.
+        return result == .success
+            || boolValue(for: "AXEnhancedUserInterface" as CFString, on: appElement) == true
+    }
+
     static func parameterizedAttributeNames(on element: AXUIElement) -> [String] {
         var names: CFArray?
         let result = AXUIElementCopyParameterizedAttributeNames(element, &names)

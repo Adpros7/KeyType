@@ -134,6 +134,9 @@ public final class AccessibilityContextTracker: NSObject {
     private func workspaceDidLaunchApp(_ note: Notification) {
         let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         webAppClassifier.noteLaunchedApplication(app)
+        if let app {
+            wakeWebAccessibilityIfNeeded(for: app)
+        }
     }
 
     // MARK: - AX observer
@@ -165,6 +168,9 @@ public final class AccessibilityContextTracker: NSObject {
         }
 
         let appElement = AXUIElementCreateApplication(pid)
+        if let frontApp {
+            wakeWebAccessibilityIfNeeded(for: frontApp, appElement: appElement)
+        }
 
         // App-level notifications (focus/window changes always come through the app element).
         addNotification(kAXFocusedUIElementChangedNotification, on: appElement, observer: createdObserver)
@@ -449,16 +455,19 @@ public final class AccessibilityContextTracker: NSObject {
     // MARK: - Helpers
 
     private func systemFocusedElement() -> AXUIElement? {
-        var focused: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(
-            systemElement,
-            kAXFocusedUIElementAttribute as CFString,
-            &focused
-        )
-        guard result == .success, let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else {
-            return nil
+        AXCaretHelper.focusedElement(systemElement: systemElement)
+    }
+
+    private func wakeWebAccessibilityIfNeeded(
+        for app: NSRunningApplication,
+        appElement: AXUIElement? = nil
+    ) {
+        guard let bundleIdentifier = app.bundleIdentifier,
+              webAppClassifier.isWebBacked(bundleIdentifier: bundleIdentifier) else {
+            return
         }
-        return (focused as! AXUIElement)
+        let element = appElement ?? AXUIElementCreateApplication(app.processIdentifier)
+        AXCaretHelper.enableEnhancedUserInterface(on: element)
     }
 
     private func frontmostAppTarget() -> AppTarget {
