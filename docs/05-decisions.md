@@ -86,6 +86,9 @@ row here.**
 | 064 | Cache Electron bundle detection outside the AX hot path | performance |
 | 065 | Suppress Latin-leading CJK completions and script-changing reuse | generation/ui |
 | 066 | Promote no-room trailing inline ghost text to a capsule | ui |
+| 067 | Use non-invasive caret geometry for native fields | context-capture |
+| 068 | Skip native non-text focused controls before deep AX reads | context-capture |
+| 069 | Restore precise geometry for native multiline editors | context-capture/ui |
 
 ---
 
@@ -2583,3 +2586,57 @@ text. Both are now closed:
   end-of-line wrap may use a capsule rather than mimicking the field's next-line text layout, which is
   preferable to drawing a continuation at an apparently unrelated leading-edge position. Tests cover
   the Codex geometry from `predictions.log` and a normal inline case with enough remaining width.
+
+## ADR-067 — Use non-invasive caret geometry for native fields
+
+- Date: 2026-06-02
+- Status: accepted
+- Context: Calendar event creation and System Settings showed focus/scroll perturbations while
+  KeyType was merely observing focused fields. The earlier app-policy theory was wrong because
+  compatibility suppression happens after `MacContextCapture` has already read focused text and caret
+  geometry. Some AX geometry calls, especially parameterized bounds/text-marker resolution and deep
+  descendant walks, can be side-effectful in native AppKit/SwiftUI panels.
+- Decision: split caret geometry resolution into `full` and `nonInvasive` strategies. Native fields
+  now use a non-invasive estimate from `AXValue`, `AXSelectedTextRange`, and `AXFrame`; web-backed
+  fields keep the full resolver because Chromium/Google-Docs-style editors need exact bounds and deep
+  editable-descendant handling. `FocusedFieldReader` now resolves field traits before choosing the
+  geometry strategy, so the choice is based on field shape rather than bundle identity.
+- Consequences: KeyType avoids the AX calls most likely to move focus or scroll in native apps,
+  without bundle-level exclusions or per-app maintenance. Native overlay placement may be less exact
+  than before because it uses estimated geometry, but suppression and privacy remain preferable to
+  perturbing the target app. Web surfaces keep the existing high-precision path.
+
+## ADR-068 — Skip native non-text focused controls before deep AX reads
+
+- Date: 2026-06-02
+- Status: accepted
+- Context: The Calendar focus jump was fixed by avoiding exact native caret geometry, but System
+  Settings still scrolled while focused on non-text controls such as sidebar rows and permission table
+  rows. `AccessibilityContextTracker` refreshes the focused element on notifications and a 0.5s safety
+  poll; `FocusedFieldReader` previously tried to turn any focused element into a snapshot, which could
+  read labels, parents, frames, and descendants even when the target was not text-bearing.
+- Decision: add an early text-eligibility gate in `FocusedFieldReader`. Native focused elements must
+  already look like usable text controls before snapshot construction continues, and
+  `AccessibilityContextTracker` only subscribes per-element value/selection notifications when the
+  focused element can produce a text snapshot. Known web-backed apps still get the existing bounded
+  descendant search because web editors often expose focus on a container instead of the editable node.
+- Consequences: KeyType avoids repeatedly touching AX rows/buttons/sliders in native apps, which
+  prevents System Settings-style scroll-into-view perturbations without a bundle-level exclusion.
+  Non-text focus now emits no text snapshot; that matches the product contract because completions only
+  apply at a cursor in editable text. Web editor coverage is preserved.
+
+## ADR-069 — Restore precise geometry for native multiline editors
+
+- Date: 2026-06-02
+- Status: accepted
+- Context: Using non-invasive `AXFrame` estimates for all native text controls fixed Calendar's
+  focus churn, but it regressed ghost-text alignment in native multiline editors such as Notes. A
+  field-frame estimate cannot represent wrapped lines or vertical caret movement in a text view.
+- Decision: choose caret geometry by focused-control shape rather than by native-vs-web alone. Web
+  fields keep the full resolver. Native multiline text roles (`AXTextArea` and `AXDocument`) use the
+  primary precise resolver so `AXBoundsForRange`/text-marker caret bounds can drive alignment. Native
+  single-line controls keep the non-invasive estimate that avoided Calendar side effects.
+- Consequences: Notes-style editors regain exact ghost placement without reintroducing deep
+  Chromium-descendant walks for native controls. Single-line native fields may still use less precise
+  placement, but they are the class that exhibited focus perturbation, and short inline suggestions
+  there are less sensitive to wrapped-line geometry.

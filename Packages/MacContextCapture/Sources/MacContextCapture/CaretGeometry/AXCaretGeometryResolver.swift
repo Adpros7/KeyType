@@ -40,11 +40,29 @@ enum AXCaretGeometryQuality: Int, Comparable {
     }
 }
 
+enum AXCaretGeometryStrategy: Equatable {
+    case full
+    case primary
+    case nonInvasive
+}
+
 @MainActor
 public struct AXCaretGeometryResolver {
     public nonisolated init() {}
 
-    public func resolveCaretRect(for element: AXUIElement) -> AXCaretGeometryResult? {
+    func resolveCaretRect(
+        for element: AXUIElement,
+        strategy: AXCaretGeometryStrategy = .full
+    ) -> AXCaretGeometryResult? {
+        switch strategy {
+        case .nonInvasive:
+            return resolveNonInvasiveCaretRect(for: element)
+        case .primary:
+            return resolvePrimaryCaretRect(for: element)
+        case .full:
+            break
+        }
+
         let primaryResult = resolvePrimaryCaretRect(for: element)
 
         if primaryResult?.quality == .exact {
@@ -71,6 +89,24 @@ public struct AXCaretGeometryResolver {
         }
 
         return primaryResult
+    }
+
+    private func resolveNonInvasiveCaretRect(for element: AXUIElement) -> AXCaretGeometryResult? {
+        guard let selection = AXCaretHelper.rangeValue(for: kAXSelectedTextRangeAttribute as CFString, on: element),
+              let textValue = AXCaretHelper.stringValue(for: kAXValueAttribute as CFString, on: element),
+              let anchorFrame = AXCaretHelper.rectValue(for: "AXFrame" as CFString, on: element)
+                .map(AXCaretHelper.cocoaRect(fromAccessibilityRect:)),
+              !textValue.isEmpty,
+              anchorFrame.width > 10,
+              anchorFrame.height > 0 else {
+            return nil
+        }
+
+        return AXCaretGeometryResult(
+            rect: conservativeEstimatedCaretRect(in: anchorFrame, text: textValue, selection: selection),
+            source: "AXFrameEstimateNonInvasive",
+            quality: .estimated
+        )
     }
 
     private func resolvePrimaryCaretRect(for element: AXUIElement) -> AXCaretGeometryResult? {

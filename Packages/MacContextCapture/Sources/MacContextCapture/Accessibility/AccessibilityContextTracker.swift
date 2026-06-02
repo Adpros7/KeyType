@@ -205,7 +205,7 @@ public final class AccessibilityContextTracker: NSObject {
         }
         observedFocusedElement = focused
 
-        if let focused {
+        if let focused, reader.canProduceTextSnapshot(from: focused) {
             addNotification(kAXSelectedTextChangedNotification, on: focused, observer: observer)
             addNotification(kAXValueChangedNotification, on: focused, observer: observer)
             addNotification(kAXUIElementDestroyedNotification, on: focused, observer: observer)

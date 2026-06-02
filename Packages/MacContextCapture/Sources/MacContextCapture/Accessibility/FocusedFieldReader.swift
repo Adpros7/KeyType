@@ -51,24 +51,17 @@ public struct FocusedFieldReader {
     /// Read the focused AX element into a snapshot. Returns nil if the element has no AX
     /// value (likely not a text-bearing field).
     public func snapshot(of element: AXUIElement) -> FocusedFieldSnapshot? {
-        let initialTarget = AppTargetResolver.resolveAppTarget(for: element)
+        let initialBundleIdentifier = AppTargetResolver.bundleIdentifier(for: element)
         let isKnownWebBackedApp = webAppClassifier.isWebBacked(
-            bundleIdentifier: initialTarget.bundleIdentifier
+            bundleIdentifier: initialBundleIdentifier
         )
-        let textElement = Self.textElement(
+        guard let textElement = Self.textElement(
             for: element,
             preferDescendantTextElement: isKnownWebBackedApp
-        )
-        let target = AppTargetResolver.resolveAppTarget(for: textElement)
-        let caretGeometry = resolver.resolveCaretRect(for: textElement)
-
-        if let mailSnapshot = MailComposeTextContext.snapshot(
-            of: textElement,
-            target: target,
-            caretGeometry: caretGeometry
-        ) {
-            return mailSnapshot
+        ) else {
+            return nil
         }
+        let target = AppTargetResolver.resolveAppTarget(for: textElement)
 
         let rawValue = AXCaretHelper.stringValue(for: kAXValueAttribute as CFString, on: textElement) ?? ""
         let axRange = AXCaretHelper.rangeValue(for: kAXSelectedTextRangeAttribute as CFString, on: textElement)
@@ -90,23 +83,41 @@ public struct FocusedFieldReader {
             range: split.range
         )
 
-        let geometry = TextFieldGeometry(
-            cursorRect: caretGeometry?.rect,
-            fieldRect: Self.fieldRect(for: textElement),
-            isAtEndOfLine: split.isAtEndOfLine,
-            isRightToLeft: WritingDirection.isRightToLeft(split.beforeCursor.isEmpty ? rawValue : split.beforeCursor),
-            cursorRectQuality: Self.caretQuality(from: caretGeometry?.qualityLabel)
-        )
-
         let placeholder = AXCaretHelper.stringValue(for: kAXPlaceholderValueAttribute as CFString, on: textElement)
         let labels = AppTargetResolver.collectLabels(for: textElement)
-        let language = LanguageDetector.detectLanguage(in: split.beforeCursor)
         let traits = AppTargetResolver.collectTraits(
             for: textElement,
             target: target,
             placeholder: placeholder,
             labels: labels,
             webAppClassifier: webAppClassifier
+        )
+        let role = AXCaretHelper.stringValue(for: kAXRoleAttribute as CFString, on: textElement)
+        let subrole = AXCaretHelper.stringValue(for: kAXSubroleAttribute as CFString, on: textElement)
+        let caretGeometry = resolver.resolveCaretRect(
+            for: textElement,
+            strategy: Self.caretGeometryStrategy(
+                isWebField: traits.isWebField,
+                role: role,
+                subrole: subrole
+            )
+        )
+
+        if let mailSnapshot = MailComposeTextContext.snapshot(
+            of: textElement,
+            target: target,
+            caretGeometry: caretGeometry
+        ) {
+            return mailSnapshot
+        }
+
+        let language = LanguageDetector.detectLanguage(in: split.beforeCursor)
+        let geometry = TextFieldGeometry(
+            cursorRect: caretGeometry?.rect,
+            fieldRect: Self.fieldRect(for: textElement),
+            isAtEndOfLine: split.isAtEndOfLine,
+            isRightToLeft: WritingDirection.isRightToLeft(split.beforeCursor.isEmpty ? rawValue : split.beforeCursor),
+            cursorRectQuality: Self.caretQuality(from: caretGeometry?.qualityLabel)
         )
 
         let context = TextFieldContext(
@@ -130,18 +141,59 @@ public struct FocusedFieldReader {
         )
     }
 
+    func canProduceTextSnapshot(from element: AXUIElement) -> Bool {
+        let bundleIdentifier = AppTargetResolver.bundleIdentifier(for: element)
+        if webAppClassifier.isWebBacked(bundleIdentifier: bundleIdentifier) {
+            return true
+        }
+        return Self.isUsableTextElement(element)
+    }
+
     /// Chromium/Safari often expose the focused node as the whole `AXWebArea` while the editable
     /// control is a descendant. Use the focused node when it already has a selection range; otherwise
     /// pick the first bounded descendant that looks like the active text control.
+    nonisolated static func shouldSearchDescendantTextElement(
+        rootIsUsable: Bool,
+        rootIsWebContainer: Bool,
+        preferDescendantTextElement: Bool
+    ) -> Bool {
+        preferDescendantTextElement && (rootIsWebContainer || !rootIsUsable)
+    }
+
+    nonisolated static func caretGeometryStrategy(
+        isWebField: Bool,
+        role: String?,
+        subrole: String?
+    ) -> AXCaretGeometryStrategy {
+        if isWebField {
+            return .full
+        }
+        if isNativeMultilineTextRole(role) || isNativeMultilineTextRole(subrole) {
+            return .primary
+        }
+        return .nonInvasive
+    }
+
+    private nonisolated static func isNativeMultilineTextRole(_ role: String?) -> Bool {
+        role == kAXTextAreaRole as String
+            || role == "AXDocument"
+    }
+
     private static func textElement(
         for element: AXUIElement,
         preferDescendantTextElement: Bool = false
-    ) -> AXUIElement {
+    ) -> AXUIElement? {
         let rootIsUsable = isUsableTextElement(element)
-        let shouldSearchDescendants = preferDescendantTextElement
-            && (isWebContainerRole(element) || !rootIsUsable)
+        let shouldSearchDescendants = shouldSearchDescendantTextElement(
+            rootIsUsable: rootIsUsable,
+            rootIsWebContainer: isWebContainerRole(element),
+            preferDescendantTextElement: preferDescendantTextElement
+        )
         if rootIsUsable, !shouldSearchDescendants {
             return element
+        }
+        guard shouldSearchDescendants else {
+            return nil
         }
 
         var queue: [(element: AXUIElement, depth: Int)] = [(element, 0)]
@@ -178,7 +230,7 @@ public struct FocusedFieldReader {
             }
         }
 
-        return bestCandidate?.element ?? element
+        return bestCandidate?.element ?? (rootIsUsable ? element : nil)
     }
 
     private static func isWebContainerRole(_ element: AXUIElement) -> Bool {
@@ -272,6 +324,14 @@ public struct FocusedFieldReader {
 /// Helpers that walk up the AX tree to populate the environment-level fields on `AppTarget`.
 @MainActor
 enum AppTargetResolver {
+    static func bundleIdentifier(for element: AXUIElement) -> String {
+        AXCaretHelper.pid(of: element)
+            .flatMap { NSRunningApplication(processIdentifier: $0) }?
+            .bundleIdentifier
+            ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            ?? "unknown"
+    }
+
     static func resolveAppTarget(for element: AXUIElement) -> AppTarget {
         let pid = AXCaretHelper.pid(of: element)
         let runningApp: NSRunningApplication? = pid
