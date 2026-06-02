@@ -139,7 +139,7 @@ public extension AppCompatibilityStore {
             ),
             TargetOverride(
                 bundleIdentifier: "com.tinyspeck.slackmacgap",
-                requiresPasteAndMatchStyle: true,
+                stringInjectionChunkSize: 8,
                 verticalAlignmentOffset: { lineHeight in lineHeight },
                 overlayPreference: .textMirror,
                 customInstructions: "Continue the current Slack message only. Keep it short and conversational."

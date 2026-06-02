@@ -83,6 +83,15 @@ final class TextInsertionTests: XCTestCase {
         XCTAssertFalse(plan.useNonBreakingSpaceWorkaround)
     }
 
+    func testPlannerUsesChunkedInjectionForNativeSlack() {
+        let target = AppTarget(bundleIdentifier: "com.tinyspeck.slackmacgap", appName: "Slack")
+        let plan = InsertionPlanner()
+            .plan(candidate: CompletionCandidate(text: " world"), context: context(target: target))
+
+        XCTAssertEqual(plan.strategy, .chunkedStringInjection(size: 8))
+        XCTAssertFalse(plan.useNonBreakingSpaceWorkaround)
+    }
+
     // MARK: - Inserter dispatch
 
     func testPasteboardPasteSavesWritesPastesRestores() async throws {

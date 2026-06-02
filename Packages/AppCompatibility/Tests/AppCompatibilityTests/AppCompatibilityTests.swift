@@ -103,8 +103,8 @@ final class AppCompatibilityTests: XCTestCase {
         let policy = AppCompatibilityStore().policy(for: context)
 
         XCTAssertTrue(policy.isCompletionEnabled)
-        XCTAssertTrue(policy.insertionRequiresPasteAndMatchStyle)
-        XCTAssertNil(policy.stringInjectionChunkSize)
+        XCTAssertFalse(policy.insertionRequiresPasteAndMatchStyle)
+        XCTAssertEqual(policy.stringInjectionChunkSize, 8)
         XCTAssertEqual(policy.overlayPreference, .textMirror)
         XCTAssertEqual(policy.verticalAlignmentOffset(24), 24, accuracy: 0.001)
         XCTAssertEqual(policy.customInstructions, [
