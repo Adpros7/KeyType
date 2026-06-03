@@ -52,7 +52,41 @@ final class CandidateFilterTests: XCTestCase {
 
     func testAcceptsAValidCandidate() {
         let filter = DefaultCandidateFilter()
-        XCTAssertNil(filter.suppressionReason(for: candidate(" world"), request: request(beforeCursor: "hello")))
+        XCTAssertNil(filter.suppressionReason(for: candidate("world"), request: request(beforeCursor: "hello ")))
+    }
+
+    func testSuppressesUnhealedLeadingWhitespaceInsideOpenWord() {
+        let filter = DefaultCandidateFilter()
+
+        XCTAssertEqual(
+            filter.suppressionReason(
+                for: candidate(" me is bob"),
+                request: request(beforeCursor: "hi, my na")
+            ),
+            .insertionUnsafe
+        )
+    }
+
+    func testAllowsHealedLeadingWhitespaceBeforeStemIsStripped() {
+        let filter = DefaultCandidateFilter()
+
+        XCTAssertNil(
+            filter.suppressionReason(
+                for: candidate(" name is bob"),
+                request: request(beforeCursor: "hi, my na", requiredPrefixBytes: Array(" na".utf8))
+            )
+        )
+    }
+
+    func testAllowsLeadingWhitespaceAtWordBoundary() {
+        let filter = DefaultCandidateFilter()
+
+        XCTAssertNil(
+            filter.suppressionReason(
+                for: candidate(" world"),
+                request: request(beforeCursor: "hello ")
+            )
+        )
     }
 
     // MARK: - App / policy gates

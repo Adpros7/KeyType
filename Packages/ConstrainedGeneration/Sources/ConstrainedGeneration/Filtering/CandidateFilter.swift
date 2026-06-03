@@ -97,7 +97,15 @@ public final class DefaultCandidateFilter: CandidateFiltering {
             return .scriptMismatch
         }
 
-        // 6b. Mid-word charset net (the in-beam `MidWordCharsetGuard` is the primary defence): a
+        // 6b. Open-word separator net: when the user is still typing a word and an unhealed prose
+        //     candidate starts a fresh whitespace-led word, accepting it would split the current word
+        //     (`"na" + " me"` -> `"na me"`). Healed requests intentionally re-emit the typed stem
+        //     before display stripping, so only apply this to ordinary unhealed completions.
+        if Self.splitsOpenWordWithLeadingWhitespace(candidate.text, request: request) {
+            return .insertionUnsafe
+        }
+
+        // 6c. Mid-word charset net (the in-beam `MidWordCharsetGuard` is the primary defence): a
         //     prose completion that closes the typed word with a garbage symbol ("gre"→"at$") or
         //     piles up punctuation ("....") is corruption, not insertable text. See ADR-052.
         if MidWordCharsetGuard.violates(completion: candidate.text, request: request) {
@@ -162,6 +170,15 @@ public final class DefaultCandidateFilter: CandidateFiltering {
             return false
         }
         return TextScriptProfile.firstSubstantiveScript(in: text) == .latin
+    }
+
+    static func splitsOpenWordWithLeadingWhitespace(_ text: String, request: CompletionRequest) -> Bool {
+        guard request.requiredPrefixBytes.isEmpty else { return false }
+        guard request.mode == .prose || request.mode == .correction else { return false }
+        guard let last = request.context.beforeCursor.last, last.isLetter || last.isNumber else {
+            return false
+        }
+        return text.first?.isWhitespace == true
     }
 
     // MARK: - Current-word typo net

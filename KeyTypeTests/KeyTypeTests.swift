@@ -50,6 +50,34 @@ struct KeyTypeTests {
         #expect(CompletionController.adaptiveDebounceNanoseconds(lastGenerationLatencyMs: nil) == 50_000_000)
     }
 
+    @Test @MainActor func settingsPersistCustomInstructions() {
+        let defaultsName = "KeyTypeTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsName)!
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        let settings = SettingsStore(defaults: defaults)
+        settings.customInstructions = "Write like a concise teammate."
+
+        let reloaded = SettingsStore(defaults: defaults)
+
+        #expect(reloaded.customInstructions == "Write like a concise teammate.")
+    }
+
+    @Test @MainActor func promptCustomInstructionsTrimWhitespaceAndDropEmptyValues() {
+        let defaultsName = "KeyTypeTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsName)!
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        let settings = SettingsStore(defaults: defaults)
+        settings.customInstructions = "  Keep it casual. \n"
+
+        #expect(settings.promptCustomInstructions == ["Keep it casual."])
+
+        settings.customInstructions = " \n\t "
+
+        #expect(settings.promptCustomInstructions.isEmpty)
+    }
+
     @Test func capsulePresentationIsUsedForVisibleCurrentLineSuffix() {
         let context = TextFieldContext(
             beforeCursor: "This is ",

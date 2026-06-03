@@ -37,4 +37,4 @@ Packages/ModelRuntime/Vendor/
 
 # Model weights (stay in ~/Library/Application Support/KeyType/Models, never in the repo)
 *.gguf
-Models/
+/Models/

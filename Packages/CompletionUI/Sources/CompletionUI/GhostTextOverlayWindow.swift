@@ -174,6 +174,10 @@ public final class GhostTextOverlayWindow {
         var lineHeight: CGFloat
     }
 
+    static func inlineBaselineYOffset(for font: NSFont) -> CGFloat {
+        ceil(max(0, font.pointSize * 0.28))
+    }
+
     static func layout(for text: String, font: NSFont, placement: OverlayPlacement) -> Layout {
         if placement.presentation == .capsule {
             return capsuleLayout(for: text, font: font, placement: placement)
@@ -181,6 +185,7 @@ public final class GhostTextOverlayWindow {
         let caret = placement.cursorRect
         let fontLineHeight = ceil(font.ascender - font.descender)
         let lineHeight = max(Self.trustedCaretHeight(for: placement, fallbackLineHeight: fontLineHeight), fontLineHeight)
+        let baselineYOffset = inlineBaselineYOffset(for: font)
         let singleLineWidth = ceil(measuredWidth(text, font: font)) + 2
 
         guard
@@ -196,10 +201,10 @@ public final class GhostTextOverlayWindow {
             switch placement.mode {
             case .mirror:
                 x = placement.isRightToLeft ? caret.maxX - width : caret.minX
-                y = caret.maxY + 2
+                y = caret.maxY + 2 + baselineYOffset
             default:
                 x = placement.isRightToLeft ? caret.minX - width : caret.maxX
-                y = caret.minY + (caret.height - lineHeight) / 2
+                y = caret.minY + (caret.height - lineHeight) / 2 + baselineYOffset
             }
             return Layout(
                 frame: CGRect(x: x, y: y, width: width, height: lineHeight),
@@ -215,7 +220,7 @@ public final class GhostTextOverlayWindow {
             return Layout(
                 frame: CGRect(
                     x: placement.isRightToLeft ? caret.minX - singleLineWidth : caret.maxX,
-                    y: caret.minY + (caret.height - lineHeight) / 2,
+                    y: caret.minY + (caret.height - lineHeight) / 2 + baselineYOffset,
                     width: singleLineWidth,
                     height: lineHeight
                 ),
@@ -232,7 +237,7 @@ public final class GhostTextOverlayWindow {
             lineHeight: lineHeight
         )
         let height = lineHeight * CGFloat(lines.count)
-        let y = caret.minY + (caret.height - lineHeight) / 2 - (height - lineHeight)
+        let y = caret.minY + (caret.height - lineHeight) / 2 - (height - lineHeight) + baselineYOffset
 
         return Layout(
             frame: CGRect(x: field.minX, y: y, width: fullLineWidth, height: height),
@@ -263,7 +268,15 @@ public final class GhostTextOverlayWindow {
             }
         }
 
-        let y = caret.minY - capsuleGapBelowCaret - capsuleHeight
+        var y = caret.minY - capsuleGapBelowCaret - capsuleHeight
+        // Clamp so the capsule doesn't spill below the visible screen area (AppKit bottom-left
+        // origin: y=0 is the bottom edge of the main display, so we clamp from below to 0).
+        // Also keep the capsule from overlapping the menu bar at the top: the main screen's
+        // visibleFrame.maxY is the first pixel below the menu bar.
+        if let screenFrame = NSScreen.main?.visibleFrame {
+            y = max(y, screenFrame.minY)
+            y = min(y, screenFrame.maxY - capsuleHeight)
+        }
 
         return Layout(
             frame: CGRect(x: x, y: y, width: capsuleWidth, height: capsuleHeight),
@@ -370,6 +383,8 @@ private extension String {
 public final class InlineGhostTextPresenter: CompletionOverlayPresenting {
     private let window: GhostTextOverlayWindow
     public private(set) var visibleCandidate: CompletionCandidate?
+    static let minimumOverlayFontPointSize: CGFloat = 10
+    static let maximumOverlayFontPointSize: CGFloat = 18
 
     public nonisolated init(window: GhostTextOverlayWindow = GhostTextOverlayWindow()) {
         self.window = window
@@ -415,13 +430,17 @@ public final class InlineGhostTextPresenter: CompletionOverlayPresenting {
             let derived = (caretHeight > 0 && metricsHeight > 0)
                 ? caretHeight * font.pointSize / metricsHeight
                 : font.pointSize
-            let size = max(1, derived * factor)
-            return NSFont(descriptor: font.fontDescriptor, size: size) ?? font
+            let size = clampedOverlayFontSize(derived * factor)
+            return NSFont(descriptor: font.fontDescriptor, size: size) ?? font.withSize(size)
         }
 
         // No field font: estimate the point size from the caret height (≈1.2× the point size for
         // typical UI fonts), since we have no metrics to scale by.
         let estimated = caretHeight > 0 ? caretHeight * 0.83 : NSFont.systemFontSize
-        return .systemFont(ofSize: max(8, min(96, estimated * factor)))
+        return .systemFont(ofSize: clampedOverlayFontSize(estimated * factor))
+    }
+
+    private static func clampedOverlayFontSize(_ size: CGFloat) -> CGFloat {
+        max(minimumOverlayFontPointSize, min(maximumOverlayFontPointSize, size))
     }
 }

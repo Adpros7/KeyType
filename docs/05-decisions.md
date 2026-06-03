@@ -2747,3 +2747,37 @@ text. Both are now closed:
   longer look like they are always at the right edge after the first visual line. Real trailing-edge
   cases still wrap ghost text to the next visual line rather than switching to a capsule or drawing
   past the field.
+
+## ADR-074 — Suppress unhealed separator completions inside open words
+
+- Date: 2026-06-02
+- Status: accepted
+- Context: Users saw mid-word accepts split the word they were typing, e.g. `"na" + " me"` became
+  `"na me"`. The healed end-of-line path already handles natural whole-word completions
+  (`"hi, my na"` constrains regeneration through `" na"` and strips it to `"me..."`), but logs also
+  showed unhealed candidates such as `ctx="cog"` -> `" New Tab..."` and `ctx="cotyps"` ->
+  `" download..."`. Those are not safe word continuations; they start a new whitespace-led word
+  while the caret is still inside an alphanumeric run.
+- Decision: suppress unhealed prose/correction candidates that begin with whitespace when the live
+  prefix ends in a letter or number. Do not rewrite the candidate at insertion time: stripping the
+  space blindly would corrupt legitimate complete-word cases (`"my" + " name"` -> `"myname"`).
+  Requests with `requiredPrefixBytes` are exempt because token healing intentionally re-emits the
+  typed stem before `MidWordHealing.strip` removes it for display and insertion.
+- Consequences: KeyType prefers showing nothing over splitting an open word with a separator-space
+  completion. Users who want the next word after a complete word should type the space first; the
+  existing `CaretBoundary` path then strips any duplicate model separator.
+
+## ADR-075 — Add global custom writing instructions in Settings
+
+- Date: 2026-06-02
+- Status: accepted
+- Context: `Prompting` already has a high-priority `customInstructions` section, and
+  `AppCompatibility` uses it for per-app/domain steering. Users also need a personal, global style
+  preference without editing app overrides or rebuilding the compatibility table.
+- Decision: store a single global instruction string in `SettingsStore`/`UserDefaults`, expose it in
+  Settings → General, trim whitespace-only values out of the prompt, and prepend the resulting
+  instruction before app/domain-specific instructions when building completions. Keep it local and
+  plain text; it is prompt guidance, not sensitive history/clipboard/OCR context.
+- Consequences: users can steer tone/style across apps while existing app-specific rules still run.
+  Empty instructions do not create a prompt section, and prompt budgeting continues to truncate the
+  custom-instruction section if the user enters a long value.

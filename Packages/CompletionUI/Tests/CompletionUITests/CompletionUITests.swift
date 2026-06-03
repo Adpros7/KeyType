@@ -220,6 +220,30 @@ final class CompletionUITests: XCTestCase {
     }
 
     @MainActor
+    func testResolvedOverlayFontCapsOversizedAXFont() {
+        let placement = OverlayPlacement(
+            cursorRect: CGRect(x: 200, y: 100, width: 2, height: 48),
+            fieldRect: CGRect(x: 20, y: 90, width: 700, height: 80)
+        )
+        let font = NSFont.systemFont(ofSize: 48)
+
+        let resolved = InlineGhostTextPresenter.resolveFont(font, placement: placement)
+
+        XCTAssertEqual(resolved.pointSize, InlineGhostTextPresenter.maximumOverlayFontPointSize)
+    }
+
+    @MainActor
+    func testFallbackOverlayFontCapsOversizedCaretHeight() {
+        let placement = OverlayPlacement(
+            cursorRect: CGRect(x: 200, y: 100, width: 2, height: 120)
+        )
+
+        let resolved = InlineGhostTextPresenter.resolveFont(nil, placement: placement)
+
+        XCTAssertEqual(resolved.pointSize, InlineGhostTextPresenter.maximumOverlayFontPointSize)
+    }
+
+    @MainActor
     func testTrailingEdgeInlineCompletionWrapsInsteadOfUsingCapsule() {
         let font = NSFont.systemFont(ofSize: 24)
         let placement = OverlayPlacement(
@@ -248,6 +272,21 @@ final class CompletionUITests: XCTestCase {
         XCTAssertLessThan(layout.frame.width, placement.fieldRect?.width ?? .infinity)
         XCTAssertEqual(layout.lines.map(\.text), [" continuation"])
         XCTAssertEqual(layout.lines.map(\.leadingInset), [0])
+    }
+
+    @MainActor
+    func testInlineGhostLayoutAppliesBaselineLift() {
+        let font = NSFont.systemFont(ofSize: 18)
+        let caret = CGRect(x: 200, y: 100, width: 2, height: 24)
+        let placement = OverlayPlacement(
+            cursorRect: caret,
+            fieldRect: CGRect(x: 20, y: 80, width: 500, height: 44)
+        )
+
+        let layout = GhostTextOverlayWindow.layout(for: " continuation", font: font, placement: placement)
+        let expectedWithoutLift = caret.minY + (caret.height - layout.lineHeight) / 2
+
+        XCTAssertEqual(layout.frame.minY, expectedWithoutLift + GhostTextOverlayWindow.inlineBaselineYOffset(for: font))
     }
 
     // MARK: - Advance past an accepted word
@@ -341,36 +380,36 @@ final class CompletionUITests: XCTestCase {
     // MARK: - Font resolution
 
     @MainActor
-    func testResolveFontKeepsFamilyAndSizesFromCaretHeight() {
+    func testResolveFontKeepsFamilyButCapsCaretDerivedSize() {
         // The field font's reported size is intentionally ignored; the typeface is sized from the
-        // caret height via the font's metrics, so the ghost's glyph box ≈ caretHeight × factor.
+        // caret height via the font's metrics, then capped so ghost text stays inline-sized.
         let field = NSFont.systemFont(ofSize: 12)
         let caretHeight: CGFloat = 20
         let factor: CGFloat = 2
         let placement = OverlayPlacement(cursorRect: CGRect(x: 0, y: 0, width: 1, height: caretHeight), fontSizeAdjustmentFactor: Double(factor))
         let resolved = InlineGhostTextPresenter.resolveFont(field, placement: placement)
         XCTAssertEqual(resolved.familyName, field.familyName)
-        XCTAssertEqual(resolved.ascender - resolved.descender, caretHeight * factor, accuracy: 0.5)
+        XCTAssertEqual(resolved.pointSize, InlineGhostTextPresenter.maximumOverlayFontPointSize)
     }
 
     @MainActor
-    func testResolveFontIsStableWhenAXSizeAlreadyMatchesCaret() {
-        // When AX's reported size is already consistent with the caret height, sizing from the
-        // caret reproduces (close to) that size rather than changing it.
+    func testResolveFontCapsLargeAXSizeEvenWhenItMatchesCaret() {
+        // Even when AX's reported size is internally consistent, presentation stays capped so the
+        // overlay does not become a large block of text over the target app.
         let field = NSFont.systemFont(ofSize: 24)
         let caretHeight = field.ascender - field.descender // the caret a 24pt line would produce
         let placement = OverlayPlacement(cursorRect: CGRect(x: 0, y: 0, width: 1, height: caretHeight))
         let resolved = InlineGhostTextPresenter.resolveFont(field, placement: placement)
-        XCTAssertEqual(resolved.pointSize, 24, accuracy: 0.5)
+        XCTAssertEqual(resolved.pointSize, InlineGhostTextPresenter.maximumOverlayFontPointSize)
     }
 
     @MainActor
     func testResolveFontFallsBackToCaretHeight() {
         let placement = OverlayPlacement(cursorRect: CGRect(x: 0, y: 0, width: 1, height: 20))
         let resolved = InlineGhostTextPresenter.resolveFont(nil, placement: placement)
-        // Estimated from caret height (20 * 0.83 ≈ 16.6), clamped into [8, 96].
-        XCTAssertGreaterThanOrEqual(resolved.pointSize, 8)
-        XCTAssertLessThanOrEqual(resolved.pointSize, 96)
+        // Estimated from caret height (20 * 0.83 ≈ 16.6), clamped into the modest overlay range.
+        XCTAssertGreaterThanOrEqual(resolved.pointSize, InlineGhostTextPresenter.minimumOverlayFontPointSize)
+        XCTAssertLessThanOrEqual(resolved.pointSize, InlineGhostTextPresenter.maximumOverlayFontPointSize)
     }
 
     @MainActor

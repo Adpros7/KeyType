@@ -2,11 +2,12 @@
 //  SettingsStore.swift
 //  KeyType
 //
-//  User-facing settings backed by UserDefaults: model selection, completion length, per-app
-//  toggles, and the privacy switches that gate sensitive context (writing history, clipboard,
-//  screen/OCR). History/clipboard/OCR default to OFF — KeyType only uses sensitive context the
-//  user has explicitly opted into. The pipeline (CompletionController / WritingHistoryRecorder /
-//  AppCompatibility wiring) reads these; SettingsView writes them. See ADR-023.
+//  User-facing settings backed by UserDefaults: model selection, completion length, custom writing
+//  instructions, per-app toggles, and the privacy switches that gate sensitive context (writing
+//  history, clipboard, screen/OCR). History/clipboard/OCR default to OFF — KeyType only uses
+//  sensitive context the user has explicitly opted into. The pipeline (CompletionController /
+//  WritingHistoryRecorder / AppCompatibility wiring) reads these; SettingsView writes them. See
+//  ADR-023.
 //
 
 import AutocompleteCore
@@ -56,6 +57,7 @@ final class SettingsStore {
         static let clipboardEnabled = "KeyType.settings.clipboardEnabled"
         static let ocrEnabled = "KeyType.settings.ocrEnabled"
         static let completionLength = "KeyType.settings.completionLength"
+        static let customInstructions = "KeyType.settings.customInstructions"
         static let selectedModelFilename = "KeyType.settings.selectedModelFilename"
         static let perAppDisabled = "KeyType.settings.perAppDisabledBundleIDs"
         static let acceptWordKeyCode = "KeyType.settings.acceptWordKeyCode"
@@ -87,6 +89,16 @@ final class SettingsStore {
         didSet { defaults.set(completionLength.rawValue, forKey: Key.completionLength) }
     }
 
+    /// Global prompt guidance appended to every completion request.
+    var customInstructions: String {
+        didSet { defaults.set(customInstructions, forKey: Key.customInstructions) }
+    }
+
+    var promptCustomInstructions: [String] {
+        let trimmed = customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? [] : [trimmed]
+    }
+
     /// Chosen GGUF filename in the Models directory, or `nil` to use the app default.
     var selectedModelFilename: String? {
         didSet { defaults.set(selectedModelFilename, forKey: Key.selectedModelFilename) }
@@ -114,6 +126,7 @@ final class SettingsStore {
         self.ocrEnabled = defaults.bool(forKey: Key.ocrEnabled)
         self.completionLength = (defaults.string(forKey: Key.completionLength))
             .flatMap(CompletionLength.init(rawValue:)) ?? .medium
+        self.customInstructions = defaults.string(forKey: Key.customInstructions) ?? ""
         self.selectedModelFilename = defaults.string(forKey: Key.selectedModelFilename)
         self.perAppDisabled = Set(defaults.stringArray(forKey: Key.perAppDisabled) ?? [])
         self.acceptWordShortcut = Self.loadShortcut(

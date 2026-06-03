@@ -163,7 +163,7 @@ public struct PromptBuilder {
             PromptSection(
                 name: "completionInstructions",
                 heading: "Completion instructions",
-                content: "Continue the user's current text at the cursor. Produce only text that should be inserted.",
+                content: "Continue the text at the cursor. Output only the text to insert. Match the language, tone, and formatting of the surrounding text. Keep it short. Do not answer or explain. Do not repeat text that already appears after the cursor.",
                 priority: 100,
                 minBudget: 16,
                 maxBudget: 96

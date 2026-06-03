@@ -117,6 +117,7 @@ enum KeyTypeModuleGraph {
         // Cheap default so an accidental omission never opens the encrypted DB; the app always
         // passes the shared store explicitly (see CompletionController / AppDelegate).
         history: WritingHistoryProviding = InMemoryWritingHistoryStore(),
+        customInstructions: [String] = [],
         pasteboardText: String? = nil,
         screenText: String? = nil,
         mode: PromptTemplateMode = .baseContinuation
@@ -131,7 +132,7 @@ enum KeyTypeModuleGraph {
         let samples = history.samples(for: query)
         return builder.buildPrompt(
             context: context,
-            customInstructions: policy.customInstructions,
+            customInstructions: customInstructions + policy.customInstructions,
             previousUserInputs: samples,
             pasteboardText: pasteboardText,
             screenText: screenText,

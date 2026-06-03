@@ -60,7 +60,7 @@ final class PromptBuilderGoldenTests: XCTestCase {
 
         let expected = """
         [Completion instructions]
-        Continue the user's current text at the cursor. Produce only text that should be inserted.
+        Continue the text at the cursor. Output only the text to insert. Match the language, tone, and formatting of the surrounding text. Keep it short. Do not answer or explain. Do not repeat text that already appears after the cursor.
 
         [General information]
         Application: Mail
@@ -102,7 +102,7 @@ final class PromptBuilderGoldenTests: XCTestCase {
 
         let expected = """
         [Completion instructions]
-        Continue the user's current text at the cursor. Produce only text that should be inserted.
+        Continue the text at the cursor. Output only the text to insert. Match the language, tone, and formatting of the surrounding text. Keep it short. Do not answer or explain. Do not repeat text that already appears after the cursor.
 
         [Custom writing instructions]
         Match the user's casual tone.

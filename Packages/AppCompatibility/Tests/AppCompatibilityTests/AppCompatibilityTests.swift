@@ -201,6 +201,19 @@ final class AppCompatibilityTests: XCTestCase {
         ])
     }
 
+    func testClaudeForDesktopDisablesMidLineAndEnvironmentContext() {
+        let target = AppTarget(bundleIdentifier: "com.anthropic.claudefordesktop", appName: "Claude")
+        let context = TextFieldContext(beforeCursor: "hi, my name is", target: target)
+
+        let policy = AppCompatibilityStore().policy(for: context)
+
+        XCTAssertTrue(policy.isCompletionEnabled)
+        XCTAssertTrue(policy.allowsTabAcceptance)
+        XCTAssertFalse(policy.allowsMidLineCompletion)
+        XCTAssertFalse(policy.includesEnvironmentContext)
+        XCTAssertFalse(policy.customInstructions.isEmpty)
+    }
+
     func testPasswordManagerBundleIsSecureExcluded() {
         let target = AppTarget(bundleIdentifier: "com.1password.1password", appName: "1Password")
         let context = TextFieldContext(beforeCursor: "sec", target: target)

@@ -157,6 +157,16 @@ public extension AppCompatibilityStore {
                 verticalAlignmentOffset: { lineHeight in lineHeight + 2 },
                 overlayPreference: .textMirror,
                 customInstructions: "Continue the current Discord message only. Keep it short and conversational."
+            ),
+            // Claude for Desktop: the input bar is a single-line field in a narrow panel; mid-line
+            // completions would render the capsule into the title bar. Disable mid-line so only
+            // end-of-line inline ghost text is used. Environment context would include Claude's own
+            // UI chrome in the prompt, so strip it.
+            TargetOverride(
+                bundleIdentifier: "com.anthropic.claudefordesktop",
+                midLineCompletionsDisabled: true,
+                customInstructions: "Continue the current message only. Keep it short and conversational.",
+                environmentContextDisabled: true
             )
         ]
 

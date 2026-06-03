@@ -551,9 +551,10 @@ final class CompletionController {
         // optional side sections are frozen briefly so unrelated history/clipboard/OCR updates do
         // not rewrite the prompt prefix and destroy KV append reuse mid-burst.
         let (sideContext, sideContextReused) = promptSideContext(for: promptContext)
+        let customInstructions = settings.promptCustomInstructions + policy.customInstructions
         let promptResult = KeyTypeModuleGraph.makePromptBuilder().buildPrompt(
             context: promptContext,
-            customInstructions: policy.customInstructions,
+            customInstructions: customInstructions,
             previousUserInputs: sideContext.previousUserInputs,
             pasteboardText: sideContext.pasteboardText,
             screenText: sideContext.screenText,
